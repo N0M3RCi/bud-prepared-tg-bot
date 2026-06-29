@@ -552,7 +552,6 @@ class Database:
                 "SELECT window_start, request_count FROM rate_limits WHERE user_id = $1",
                 user_id,
             )
-            now_ts = "NOW()"
             window_sec = settings.rate_limit_window_seconds
 
             if row is None:
@@ -568,8 +567,8 @@ class Database:
 
             # Check if window has expired
             expired = await conn.fetchval(
-                "SELECT $1 < $2 - interval '1 second' * $3",
-                window_start, now_ts, window_sec,
+                "SELECT $1 < NOW() - interval '1 second' * $2",
+                window_start, window_sec,
             )
             if expired:
                 # Reset window
