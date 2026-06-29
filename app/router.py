@@ -2223,7 +2223,7 @@ async def _process_text_response(message: Message, user_text: str) -> str:
         image_ctx_var.set(user_id)
 
         raw_tool_calls_data = [
-            {"id": tc[0], "function": {"name": tc[1], "arguments": json.dumps(tc[2])}}
+            {"id": tc[0], "type": "function", "function": {"name": tc[1], "arguments": json.dumps(tc[2])}}
             for tc in tool_calls
         ]
         tool_calls_json = json.dumps(raw_tool_calls_data)
