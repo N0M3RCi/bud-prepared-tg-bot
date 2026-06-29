@@ -1443,7 +1443,9 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
 
 
 async def _show_stats(callback: CallbackQuery, user_id: int) -> None:
-    """Show user stats and return to menu after a moment."""
+    """Show user stats in a new message (not editing the menu) so the menu stays intact."""
+    await callback.answer()
+
     today = await Database.get_user_usage_today(user_id)
     lifetime = await Database.get_user_lifetime_usage(user_id)
     conv = await Database.get_active_conversation(user_id)
@@ -1452,25 +1454,26 @@ async def _show_stats(callback: CallbackQuery, user_id: int) -> None:
 
     lines = [
         "*Your Stats:*",
-        f"• Requests today: {today.get('requests', 0)}",
-        f"• Messages this conversation: {len(all_msgs)}",
-        f"• Images generated: {today.get('images_generated', 0)}",
+        f"• Requests today: `{today.get('requests', 0)}`",
+        f"• Messages this conversation: `{len(all_msgs)}`",
+        f"• Images generated: `{today.get('images_generated', 0)}`",
     ]
     if lifetime.get("total_requests"):
-        lines.append(f"• All-time requests: {lifetime['total_requests']}")
+        lines.append(f"• All-time requests: `{lifetime['total_requests']}`")
     if lifetime.get("total_tokens_in"):
-        lines.append(f"• All-time tokens in: ~{lifetime['total_tokens_in']:,}")
+        lines.append(f"• All-time tokens in: ~`{lifetime['total_tokens_in']:,}`")
     if lifetime.get("total_tokens_out"):
-        lines.append(f"• All-time tokens out: ~{lifetime['total_tokens_out']:,}")
+        lines.append(f"• All-time tokens out: ~`{lifetime['total_tokens_out']:,}`")
 
     text = "\n".join(lines)
+
+    # Send as a new message with a "Back" button so the menu stays intact
+    builder = InlineKeyboardBuilder()
+    builder.row(_button("⬅️  Back to Menu", f"page:{_current_page.get(user_id, PAGE_MAIN)}"), width=1)
     try:
-        await callback.message.edit_text(text, parse_mode="Markdown")
+        await callback.message.answer(text, parse_mode="Markdown", reply_markup=builder.as_markup())
     except Exception:
-        pass  # Never fallback to answer — edits pinned menu only
-    await asyncio.sleep(2.5)
-    # Return to previous page
-    await _return_to_page(callback.message, user_id)
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════

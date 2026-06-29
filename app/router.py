@@ -2305,62 +2305,20 @@ async def _record_usage_async(user_id: int, context_json: str, response_text: st
 
 
 async def _stream_progressive(message: Message, full_text: str) -> str:
-    """Send the already-received LLM response progressively to the user.
+    """Send the LLM response as a single message at the bottom of the chat.
 
-    Since we already have the full text from stream_and_collect, we simulate
-    progressive delivery by sending chunks, starting fast then slowing down.
+    Previously this used progressive editing (send short chunk → edit longer → edit final),
+    but that caused ordering issues: edit_text keeps the message at its original position,
+    so if the user sends a follow-up while streaming, the edited final response appears
+    ABOVE the user's new message instead of below it.
+
+    Now we send the full response at once. The typing indicator (send_chat_action)
+    already provides immediate responsiveness.
     """
     if not full_text:
         return full_text
 
-    telegram_msg: Message | None = None
-    last_edit_time = 0.0
-    edits = 0
-    sent_text = ""
-
-    # Chunk the text into progressive segments
-    chunk_size = max(20, len(full_text) // 8)
-    start = 0
-
-    while start < len(full_text):
-        end = min(start + chunk_size, len(full_text))
-        # Try to break at a word boundary
-        if end < len(full_text):
-            # Look for a space or newline near the chunk boundary
-            for break_char in ("\n", ". ", " ", ","):
-                break_at = full_text.rfind(break_char, start, end)
-                if break_at > start + chunk_size // 3:
-                    end = break_at + (2 if break_char == ". " else (1 if break_char == "\n" else 1))
-                    break
-
-        sent_text = full_text[:end]
-
-        try:
-            if telegram_msg is None:
-                telegram_msg = await _reply_or_answer(message, sent_text)
-            else:
-                await telegram_msg.edit_text(sent_text)
-        except Exception:
-            pass
-
-        edits += 1
-        start = end
-
-        # Progressive timing: fast first 3 updates, then slower
-        if edits <= settings.stream_initial_updates:
-            await asyncio.sleep(settings.stream_initial_interval)
-        else:
-            await asyncio.sleep(settings.stream_edit_interval)
-
-    # Final update with the full text
-    if telegram_msg and telegram_msg.text != full_text:
-        try:
-            await telegram_msg.edit_text(full_text)
-        except Exception:
-            await _send_long_message(message, full_text)
-    elif telegram_msg is None:
-        await _send_long_message(message, full_text)
-
+    await _reply_or_answer(message, full_text)
     return full_text
 
 
@@ -2517,27 +2475,17 @@ async def _process_vision_response(
 # ─────────────────────────── Utility ───────────────────────────
 
 async def _reply_or_answer(message: Message, text: str, **kwargs) -> Message:
-    """Send a message — threaded reply in groups, normal answer in DMs.
+    """Send a message — threaded reply always, so responses are visually linked
+    to the user's message regardless of ordering.
 
-    In groups this creates a reply thread (or continues an existing one).
-    In private chats it behaves identically to message.answer().
     Falls back to plain text if Markdown parsing fails.
     """
-    if _is_group_chat(message):
-        try:
-            return await message.reply(text, **kwargs)
-        except Exception as e:
-            if "can't parse entities" in str(e) and kwargs.get("parse_mode"):
-                kwargs.pop("parse_mode")
-                return await message.reply(text, **kwargs)
-            raise
     try:
-        return await message.answer(text, **kwargs)
+        return await message.reply(text, **kwargs)
     except Exception as e:
         if "can't parse entities" in str(e) and kwargs.get("parse_mode"):
             kwargs.pop("parse_mode")
-            return await message.answer(text, **kwargs)
-        raise
+            return await message.reply(text, **kwargs)
 
 
 async def _reply_or_answer_photo(message: Message, photo: BufferedInputFile, **kwargs) -> Message:
