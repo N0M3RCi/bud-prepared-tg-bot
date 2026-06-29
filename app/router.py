@@ -2263,8 +2263,9 @@ async def _select_fast_model(user_text: str, user_id: int) -> str:
 
     Heuristic: short text (< 60 chars, no multi-sentence) with no question marks
     or complex punctuation → fast model. Everything else → user's preferred model.
+    Uses SessionManager cache to avoid DB round-trip.
     """
-    preferred = await Database.get_preferred_model(user_id)
+    preferred = await SessionManager.get_preferred_model_cached(user_id)
     if preferred:
         return preferred
 

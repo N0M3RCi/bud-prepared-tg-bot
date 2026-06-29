@@ -81,6 +81,12 @@ class SessionManager:
         return user
 
     @classmethod
+    async def get_preferred_model_cached(cls, user_id: int) -> Optional[str]:
+        """Get preferred model from cached user settings — avoids a DB call."""
+        user = await cls._get_user_settings_cached(user_id)
+        return user.get("preferred_model") if user else None
+
+    @classmethod
     async def update_system_prompt(cls, user_id: int, prompt: str) -> None:
         await Database.update_user_prompt(user_id, prompt)
         bust_cache(user_id)

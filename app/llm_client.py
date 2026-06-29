@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 # Retry configuration
 MAX_RETRIES = 3
 BASE_RETRY_DELAY = 1.0  # seconds
+IMAGE_RETRIES = 2  # fewer retries for image gen — fail fast
 
 
 class LLMClient:
@@ -253,16 +254,12 @@ class LLMClient:
     async def generate_image(cls, prompt: str) -> Optional[str]:
         """Generate an image via the configured image model.
 
-        Tries the OpenAI-compatible images/generations endpoint first.
-        If that fails, falls back to the chat completions endpoint
-        (which many unified APIs use for image models).
+        Uses the OpenAI-compatible images/generations endpoint directly
+        with minimal retries for fast failure.
         """
         client = cls.get_image_client()
-        base_url = settings.near_ai_image_base_url or settings.near_ai_base_url
-        api_key = settings.near_ai_image_api_key or settings.near_ai_api_key
 
-        # Attempt 1: standard OpenAI images/generations endpoint
-        for attempt in range(MAX_RETRIES):
+        for attempt in range(IMAGE_RETRIES):
             try:
                 response = await client.images.generate(
                     model=settings.near_ai_image_model,
@@ -278,38 +275,15 @@ class LLMClient:
                 b64 = data["data"][0].get("b64_json") if data.get("data") else None
                 if b64:
                     return f"data:image/png;base64,{b64}"
-                break  # No URL and no base64 — fall through to fallback
+                break  # No URL and no base64 — give up
             except Exception as e:
-                if attempt < MAX_RETRIES - 1:
+                if attempt < IMAGE_RETRIES - 1:
                     delay = BASE_RETRY_DELAY * (2 ** attempt)
-                    logger.warning("Image gen images/generations failed (attempt %d/%d), retrying in %.1fs: %s",
-                                   attempt + 1, MAX_RETRIES, delay, e)
+                    logger.warning("Image gen attempt %d/%d failed, retry in %.1fs: %s",
+                                   attempt + 1, IMAGE_RETRIES, delay, e)
                     await asyncio.sleep(delay)
                 else:
-                    logger.warning("Image gen images/generations exhausted (%s) — trying chat completions fallback", e)
-
-        # Attempt 2: fallback — chat completions endpoint (used by NEAR AI & other unified APIs)
-        try:
-            async with httpx.AsyncClient(timeout=60) as http:
-                resp = await http.post(
-                    f"{base_url.rstrip('/')}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": settings.near_ai_image_model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 4096,
-                    },
-                )
-                resp.raise_for_status()
-                result = resp.json()
-                content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-                if content:
-                    return content
-        except Exception as e:
-            logger.error("Image gen chat completions fallback also failed: %s", e)
+                    logger.error("Image gen failed after %d attempts: %s", IMAGE_RETRIES, e)
 
         return None
 
