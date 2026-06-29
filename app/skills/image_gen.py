@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import logging
 import os
 from contextvars import ContextVar
@@ -50,14 +51,23 @@ async def generate_image(prompt: str) -> str:
         return "Sorry, image generation failed. Please try a different prompt."
 
     # Download the image asynchronously
+    img_bytes = None
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            img_bytes = response.content
+        if url.startswith("data:image"):
+            # Base64 data URI — decode inline instead of HTTP download
+            _, b64_data = url.split(",", 1)
+            img_bytes = base64.b64decode(b64_data)
+        else:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                img_bytes = response.content
     except Exception as e:
         logger.error("Image download failed: %s", e)
-        return f"Here is the generated image URL: {url}"
+        return "Image generated, but download failed. The image URL was logged."
+
+    if img_bytes is None:
+        return "Sorry, image generation failed."
 
     # Save to temp file
     os.makedirs("/tmp/bot_images", exist_ok=True)
@@ -71,4 +81,5 @@ async def generate_image(prompt: str) -> str:
         _pending_images.setdefault(uid, []).append(temp_path)
         logger.info("Image saved for user %d: %s", uid, temp_path)
 
-    return f"Image generated successfully. You can share the image details with the user. URL: {url}"
+    # Keep return text short — the image is sent as a Telegram photo separately
+    return "Image generated successfully."
