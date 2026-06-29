@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+/* ── PAGE SCROLL LOCK ──────────────────────────────────────────────── */
+/* Prevent document from being the scroll container — #root handles all
+   scrolling. This stops browser scroll anchoring from moving the page
+   when new content appears inside child containers.                     */
+html, body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden !important;
+  scroll-behavior: auto !important;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+/* Every single element — block scroll anchoring */
+*, *::before, *::after {
+  overflow-anchor: none !important;
+}
+
+/* Root container — IS the scrollable area. Programmatic scroll-to-top
+   on content update (handled in JS). */
+#root {
+  height: 100vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Terminal container — internal scroll, never affects page */
+.terminal-container {
+  overflow-anchor: none !important;
+  overscroll-behavior: contain;
+  resize: none;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #1e293b;
+}
+::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}

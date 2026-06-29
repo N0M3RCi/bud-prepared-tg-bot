@@ -1,0 +1,12 @@
+[build]
+  builder = "nixpacks"
+
+[build.environment]
+  NIXPACKS_PATH = "/app"
+
+[deploy]
+  startCommand = "python bot.py"
+  # Railway auto-detects $PORT; healthcheckPort is omitted so Railway uses $PORT.
+  healthcheckPath = "/"
+  restartPolicyType = "always"
+  restartPolicyMaxRetries = 10
