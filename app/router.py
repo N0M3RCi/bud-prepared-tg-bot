@@ -24,7 +24,7 @@ from app.skills.registry import (
 )
 from app.skills.image_gen import pop_pending_images, current_user_id as image_ctx_var
 
-from app.menu import menu_router, process_pending_action, _pending_action as _pending_menu_action
+from app.menu import menu_router, process_pending_action, _pending_action as _pending_menu_action, _return_to_page
 from app.dashboard_reporter import (
     report_message,
     report_token_spend,
@@ -1891,7 +1891,7 @@ async def handle_file(message: Message) -> None:
         return
 
     # Check if there's a pending "read_file" menu action — consume it
-    _pending_menu_action.pop(user_id, None)
+    was_menu_action = bool(_pending_menu_action.pop(user_id, None))
 
     # Check if blocked
     blocked = await Database.is_user_blocked(user_id)
@@ -1974,6 +1974,15 @@ async def handle_file(message: Message) -> None:
                 f"User uploaded a file '{file_name}'. Analyze it using the read_file tool "
                 f"with path='{local_path}' and analysis_prompt='{analysis_prompt}'.",
             )
+
+        # If the file was uploaded via the menu "Read File" action, restore the
+        # pinned menu (which was showing the input prompt) so the user sees the
+        # menu again instead of a stale prompt.
+        if was_menu_action:
+            try:
+                await _return_to_page(message, user_id)
+            except Exception:
+                pass
 
         elapsed = (time.monotonic() - start) * 1000
         _log_request(user_id, "file_done", ms=f"{elapsed:.0f}")

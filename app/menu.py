@@ -1314,10 +1314,12 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
                 BufferedInputFile(export_bytes, filename=f"conversation_{conv['id']}.txt"),
                 caption=f"Exported: {conv.get('title', 'Untitled')}",
             )
+            await callback.answer()
+            await _send_info_message(callback, f"📤 Conversation exported as `conversation_{conv['id']}.txt`")
+            return
         except Exception as e:
             logger.error("Export failed: %s", e)
             await callback.answer("Failed to export conversation.", show_alert=True)
-        await _return_to_page(callback.message, user_id)
     elif action == "admin_stats":
         if user_id not in settings.admin_ids:
             await callback.answer("Access denied.", show_alert=True)
@@ -1365,13 +1367,8 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
             await callback.answer("Access denied.", show_alert=True)
             return
         deleted = await Database.clear_feedback()
-        await callback.answer(f"Deleted {deleted} feedback entries.")
-        # Refresh feedback page
-        text2, markup2 = await build_admin_feedback_page(user_id)
-        try:
-            await callback.message.edit_text(text2, parse_mode="Markdown", reply_markup=markup2)
-        except Exception:
-            pass
+        await callback.answer()
+        await _send_info_message(callback, f"🗑️ Deleted {deleted} feedback entries.")
 
     elif action == "dismiss_info":
         await _dismiss_info(callback, user_id)
@@ -1474,6 +1471,7 @@ async def _show_stats(callback: CallbackQuery, user_id: int) -> None:
 
     lines = [
         "*Your Stats:*",
+        f"• User ID: `{user_id}`",
         f"• Requests today: `{today.get('requests', 0)}`",
         f"• Messages this conversation: `{len(all_msgs)}`",
         f"• Images generated: `{today.get('images_generated', 0)}`",
