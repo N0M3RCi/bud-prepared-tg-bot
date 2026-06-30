@@ -1100,6 +1100,7 @@ async def _return_to_page(message: Message, user_id: int) -> None:
 
     Uses _menu_tracker to find the single menu message — never sends a new one.
     The `message` parameter is only used for `message.bot` (Telegram API client).
+    Falls back to sending a new menu if the pinned message was deleted.
     """
     page = _current_page.get(user_id, PAGE_MAIN)
     text, markup = await _build_page_for_page(page, user_id)
@@ -1113,8 +1114,19 @@ async def _return_to_page(message: Message, user_id: int) -> None:
                 parse_mode="Markdown",
                 reply_markup=markup,
             )
+            return
         except Exception:
-            pass  # Menu may have been deleted — user can type /menu again
+            pass  # Menu may have been deleted — fall through to send new one
+
+    # Fallback: send a fresh menu message
+    try:
+        sent = await message.answer(text, parse_mode="Markdown", reply_markup=markup)
+        _menu_tracker[user_id] = {
+            "chat_id": sent.chat.id,
+            "message_id": sent.message_id,
+        }
+    except Exception:
+        pass
 
 
 async def _navigate_page(callback: CallbackQuery, user_id: int, page: str) -> None:
@@ -1237,13 +1249,16 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
         if not last_text:
             await callback.answer("No message to retry.", show_alert=True)
             return
-        try:
-            await callback.message.edit_text("🔄 Retrying last message...")
-        except Exception:
-            pass  # Never fallback to answer
-        # Simulate a message for processing
+        await callback.answer()
+        # Send status message without touching the pinned menu
+        status_msg = await callback.message.answer("🔄 Retrying last message...")
         _processing_bot_msg = callback.message
         await _router._process_text_response(_processing_bot_msg, last_text)
+        # Clean up status message
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
         pending = pop_pending_images(user_id)
         for img_path in pending:
             try:
@@ -1256,7 +1271,6 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
                 os.remove(img_path)
             except Exception as e:
                 logger.error("Menu retry image send failed: %s", e)
-        await _return_to_page(callback.message, user_id)
     elif action == "help":
         help_text = (
             "🤖 *Bud AI Help*\n\n"
@@ -1714,9 +1728,16 @@ async def process_pending_action(message: Message, user_id: int, text: str) -> b
         except Exception:
             await message.answer("❌ Action failed. Please try again.")
 
-    # Return to previous page after a brief pause
-    await asyncio.sleep(1.5)
-    await _return_to_page(message, user_id)
+    # Attach a "Back to Menu" dismiss button to the result message,
+    # so the user always has an explicit way to return to the menu.
+    # This is more reliable than auto-returning via _return_to_page
+    # which can silently fail.
+    try:
+        builder = InlineKeyboardBuilder()
+        builder.row(_button("⬅️  Back to Menu", "action:dismiss_info"), width=1)
+        await processing_msg.edit_reply_markup(reply_markup=builder.as_markup())
+    except Exception:
+        pass
     return True
 
 
