@@ -875,7 +875,7 @@ async def build_admin_llm_config_page(user_id: int) -> tuple[str, InlineKeyboard
     text += "*Commands:*\n"
     text += "  `/admin_llm_config set <key> <value>`\n"
     text += "  `/admin_llm_config reset <key>`\n"
-    text += "*Valid keys:* temperature, max_tokens, model, image_model, image_size"
+    text += "*Valid keys:* `temperature`, `max_tokens`, `model`, `image_model`, `image_size`"
 
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -914,7 +914,10 @@ async def build_admin_skills_page(user_id: int) -> tuple[str, InlineKeyboardMark
 
         has_handler = "✅" if name in _TOOL_HANDLERS else "❌"
         text += f"{has_handler} `{name}`\n"
-        text += f"   📝 {desc[:100]}\n"
+        # Wrap description in backticks to prevent Markdown entity parsing errors
+        # (descriptions may contain **, _, etc. that Telegram would interpret as formatting)
+        safe_desc = desc[:100].replace("`", "'")
+        text += f"   📝 `{safe_desc}`\n"
         if params:
             text += f"   📥 Params: {', '.join(f'`{k}`' for k in params.keys())}\n"
         if required:
