@@ -1591,13 +1591,21 @@ async def process_pending_action(message: Message, user_id: int, text: str) -> b
     try:
         if action == "web_search":
             result = await execute_tool("web_search", {"query": text})
-            # Truncate long results — Telegram has a ~4096 char message limit
+            # Display results — try Markdown first, fallback to plain text.
+            # web_search returns **title** (not Telegram Markdown) and URLs may
+            # contain underscores. Telegram legacy Markdown has no escape mechanism.
             header = "🔍 *Search Results*\n\n"
             max_body = 4000 - len(header)
-            body = _escape_md(result)
+            body = result
             if len(body) > max_body:
-                body = body[:max_body] + "\n\n_… (truncated)_"
-            await processing_msg.edit_text(f"{header}{body}", parse_mode="Markdown")
+                body = body[:max_body] + "\n\n… (truncated)"
+            try:
+                await processing_msg.edit_text(f"{header}{body}", parse_mode="Markdown")
+            except Exception:
+                plain = f"🔍 Search Results:\n\n{result}"
+                if len(plain) > 4096:
+                    plain = plain[:4060] + "\n\n… (truncated)"
+                await processing_msg.edit_text(plain)
 
         elif action == "generate_image":
             from app.skills.image_gen import current_user_id as img_ctx

@@ -959,13 +959,23 @@ async def cmd_search(message: Message) -> None:
             message.chat.id, f"🔍 Searching for: {query}",
         )
         result = await execute_tool("web_search", {"query": query})
-        # Truncate long results — Telegram has a ~4096 char message limit
+        # Display results — try Markdown first (for the header bold), fallback to plain text
+        # NOTE: web_search returns **title** which is NOT Telegram Markdown, and URLs may
+        # contain underscores. Telegram legacy Markdown has no escape mechanism, so we
+        # must fallback gracefully instead of using broken escape sequences.
         header = "🔍 *Search Results*\n\n"
         max_body = 4000 - len(header)
-        body = _escape_md(result)
+        body = result
         if len(body) > max_body:
-            body = body[:max_body] + "\n\n_… (truncated)_"
-        await status_msg.edit_text(f"{header}{body}", parse_mode="Markdown")
+            body = body[:max_body] + "\n\n… (truncated)"
+        try:
+            await status_msg.edit_text(f"{header}{body}", parse_mode="Markdown")
+        except Exception:
+            # Markdown entity parsing failed — retry as plain text
+            plain = f"🔍 Search Results:\n\n{result}"
+            if len(plain) > 4096:
+                plain = plain[:4060] + "\n\n… (truncated)"
+            await status_msg.edit_text(plain)
         await Database.record_usage(user_id, searches=1)
     except Exception as e:
         logger.error("[user=%d] Quick search error: %s", user_id, e)
