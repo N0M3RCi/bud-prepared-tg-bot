@@ -1507,23 +1507,13 @@ async def _send_info_message(target: Message | CallbackQuery, text: str, parse_m
 
 
 async def _dismiss_info(callback: CallbackQuery, user_id: int) -> None:
-    """Delete the info/dismissable message and return to the menu.
+    """Dismiss the info/result message and return to the menu page.
 
-    Deletes the old pinned menu message first so _return_to_page sends
-    a fresh menu at the bottom of the chat (right under the last bot
-    result) instead of editing the old stale menu back at its original
-    position higher up in the conversation.
+    Deletes just the result message (the one with the "Back to Menu" button)
+    and edits the existing tracked menu message back to the user's current page.
+    Never creates duplicate menus or re-positions the menu.
     """
-    tracker = _menu_tracker.pop(user_id, None)
-    if tracker:
-        try:
-            await callback.bot.delete_message(
-                chat_id=tracker["chat_id"],
-                message_id=tracker["message_id"],
-            )
-        except Exception:
-            pass
-
+    # Delete the result message (the "Back to Menu" message itself)
     try:
         await callback.message.delete()
     except Exception:
@@ -1855,9 +1845,31 @@ CMD_MENU = Command("menu", "m")
 
 @menu_router.message(CMD_MENU)
 async def cmd_menu(message: Message) -> None:
-    """Open the premium menu."""
+    """Open the premium menu — edits existing tracked menu if one exists,
+    otherwise sends a new one. Never creates duplicate menus."""
     user_id = message.from_user.id
     _current_page[user_id] = PAGE_MAIN
+    text, markup = await build_main_page(user_id)
+
+    tracker = _menu_tracker.get(user_id)
+    if tracker:
+        # Edit existing menu message instead of sending a new one
+        try:
+            await message.bot.edit_message_text(
+                text,
+                chat_id=tracker["chat_id"],
+                message_id=tracker["message_id"],
+                parse_mode="Markdown",
+                reply_markup=markup,
+            )
+            return
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e).lower():
+                return
+        except Exception:
+            pass  # Fall through to send new message
+
+    # No valid tracker — send a fresh menu
     await _show_main_menu(message, user_id)
 
 
