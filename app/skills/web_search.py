@@ -43,21 +43,15 @@ def _get_client() -> Optional[TavilyClient]:
     return _client
 
 
-_NEWS_KEYWORDS = {"news", "latest", "update", "today", "current", "breaking",
-                    "flood", "weather", "election", "sports", "stock", "market",
-                    "covid", "pandemic", "earthquake", "hurricane", "storm",
-                    "crash", "accident", "attack", "war", "conflict"}
-
-_DEFAULT_DAYS = 30
-_NEWS_DAYS = 7
+_DAYS = 14
 
 
 async def web_search(query: str, max_results: int = 5) -> str:
     """Execute a web search via Tavily with recency-aware parameters.
 
-    Detects news/current-event queries and automatically sets a narrower
-    time window and news topic to return fresh results rather than old
-    but keyword-relevant results.
+    Uses general search with a 14-day window to return fresh, relevant
+    results without Tavily's news topic categorization (which adds
+    irrelevant category labels to results).
     """
     client = _get_client()
     if client is None:
@@ -67,25 +61,16 @@ async def web_search(query: str, max_results: int = 5) -> str:
             "Please ask the user to set up the Tavily API key."
         )
 
-    # Heuristic: detect news/current-event queries for recency filtering
-    query_lower = query.lower()
-    is_news = any(kw in query_lower for kw in _NEWS_KEYWORDS)
-
     try:
         loop = asyncio.get_running_loop()
 
         def _search() -> dict:
-            kwargs: dict = {
-                "query": query,
-                "max_results": min(max_results, 10),
-                "search_depth": "advanced",
-            }
-            if is_news:
-                kwargs["topic"] = "news"
-                kwargs["days"] = _NEWS_DAYS
-            else:
-                kwargs["days"] = _DEFAULT_DAYS
-            return client.search(**kwargs)
+            return client.search(
+                query=query,
+                max_results=min(max_results, 10),
+                search_depth="advanced",
+                days=_DAYS,
+            )
 
         response = await loop.run_in_executor(None, _search)
         results = response.get("results", [])
