@@ -5,7 +5,6 @@ import json
 import logging
 from typing import Any, AsyncGenerator, Optional
 
-import httpx
 from openai import AsyncOpenAI, APIError, RateLimitError, APITimeoutError
 
 from app.config import settings

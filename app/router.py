@@ -19,7 +19,6 @@ from app.llm_client import LLMClient
 from app.session_manager import SessionManager, bust_cache
 from app.skills.registry import (
     get_tool_definitions,
-    parse_tool_calls,
     execute_tool,
 )
 from app.skills.image_gen import pop_pending_images, current_user_id as image_ctx_var
@@ -1108,6 +1107,8 @@ async def callback_model_select(callback: CallbackQuery) -> None:
         await callback.answer("Invalid model.", show_alert=True)
         return
 
+    # Capture old model before switching, for dashboard reporting
+    old_model = await Database.get_preferred_model(user_id) or settings.near_ai_model
     await Database.set_preferred_model(user_id, model_name)
     await callback.answer(f"Switched to {model_name}")
 
@@ -1117,7 +1118,7 @@ async def callback_model_select(callback: CallbackQuery) -> None:
         user_id=user_id,
         message_text=f"Switched to {model_name}",
         msg_type="settings",
-        extra={"previous_model": current_model, "new_model": model_name},
+        extra={"previous_model": old_model, "new_model": model_name},
     ))
 
     # Refresh the model selection message
@@ -2191,21 +2192,26 @@ async def _process_text_response(message: Message, user_text: str) -> str:
             pass
 
     for iteration in range(MAX_TOOL_ITERATIONS):
+        typing_task = None
         if iteration == 0:
-            typing_task = asyncio.ensure_future(_keep_typing())
+            try:
+                typing_task = asyncio.ensure_future(_keep_typing())
+            except Exception:
+                pass
         else:
             # Re-run context with tool results
             context, conv_id = await SessionManager.get_conversation_context(user_id)
 
         # Fix #1: Single streaming call — stream_and_collect returns both
         # content and tool_calls from one stream, no separate non-streaming call.
-        streamed_text, tool_calls = await LLMClient.stream_and_collect(
-            messages=context, tools=tools, model=model,
-        )
-
-        if typing_task:
-            typing_task.cancel()
-            typing_task = None
+        try:
+            streamed_text, tool_calls = await LLMClient.stream_and_collect(
+                messages=context, tools=tools, model=model,
+            )
+        finally:
+            if typing_task:
+                typing_task.cancel()
+                typing_task = None
 
         # Fix #3: Deferred token counting — fire-and-forget
         asyncio.ensure_future(_record_usage_async(
@@ -2256,12 +2262,11 @@ async def _process_text_response(message: Message, user_text: str) -> str:
         await asyncio.gather(*tool_tasks)
 
     else:
-        # Exceeded max tool iterations
+        # Exceeded max tool iterations — send a default response to the user
         if typing_task:
             typing_task.cancel()
         full_response = full_response or "I've completed multiple operations. Feel free to ask for more details."
-        if iteration >= MAX_TOOL_ITERATIONS:
-            await _send_long_message(message, full_response)
+        await _send_long_message(message, full_response)
 
     if not full_response:
         full_response = "I processed your request."
@@ -2382,34 +2387,37 @@ async def _process_vision_response(
             except Exception:
                 pass
 
-        typing_task = asyncio.ensure_future(_keep_typing())
+        typing_task = None
+        try:
+            typing_task = asyncio.ensure_future(_keep_typing())
 
-        client = LLMClient.get_client()
-        raw_stream = await client.chat.completions.create(
-            model=settings.near_ai_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": data_uri}},
-                    ],
-                },
-            ],
-            max_tokens=settings.max_response_tokens,
-            stream=True,
-        )
+            client = LLMClient.get_client()
+            raw_stream = await client.chat.completions.create(
+                model=settings.near_ai_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": data_uri}},
+                        ],
+                    },
+                ],
+                max_tokens=settings.max_response_tokens,
+                stream=True,
+            )
 
-        full_text = ""
-        async for chunk in raw_stream:
-            delta = chunk.choices[0].delta if chunk.choices else None
-            text_piece = delta.content if delta else ""
-            if not text_piece:
-                continue
-            full_text += text_piece
-
-        typing_task.cancel()
+            full_text = ""
+            async for chunk in raw_stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                text_piece = delta.content if delta else ""
+                if not text_piece:
+                    continue
+                full_text += text_piece
+        finally:
+            if typing_task:
+                typing_task.cancel()
 
         # Send the full response at once — no progressive editing
         if full_text:

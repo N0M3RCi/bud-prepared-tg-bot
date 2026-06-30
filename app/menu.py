@@ -15,7 +15,7 @@ import asyncio
 import json
 import logging
 
-from aiogram import Bot, Router, F
+from aiogram import Router, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import (

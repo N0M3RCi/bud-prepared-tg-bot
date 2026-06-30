@@ -201,8 +201,6 @@ async def _analyze_image(file_path: str, analysis_prompt: str) -> str:
         )
         analysis = response.choices[0].message.content or "No analysis generated."
         return f"**Image Analysis** ({width}x{height}, {fmt})\n\n{analysis}"
-    except ImportError:
-        return f"Image file detected ({file_path}). Install required packages."
     except Exception as e:
         logger.error("Image analysis failed: %s", e)
         return f"Failed to analyze image: {e}"
