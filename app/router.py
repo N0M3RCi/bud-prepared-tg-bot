@@ -842,7 +842,7 @@ async def cmd_settings(message: Message) -> None:
         return
 
     lines = [
-        f"*System Prompt:* {user.get('system_prompt', 'Default')[:100]}...",
+        f"*System Prompt:* `{_escape_md(user.get('system_prompt', 'Default'))[:100]}`...",
         f"*Max Messages:* {user.get('max_context_messages', 50)}",
         f"*Max Tokens:* {user.get('max_context_tokens', 128000)}",
     ]
@@ -1382,6 +1382,7 @@ async def cmd_export(message: Message) -> None:
         await message.answer_document(
             BufferedInputFile(export_bytes, filename=f"conversation_{conv['id']}.txt"),
             caption=f"Exported conversation: {conv.get('title', 'Untitled')}",
+            parse_mode=None,
         )
     except Exception as e:
         logger.error("Export failed: %s", e)
@@ -1469,7 +1470,7 @@ async def cmd_admin_broadcast(message: Message) -> None:
         try:
             await message.bot.send_message(
                 uid,
-                f"*📢 Broadcast from admin:*\n\n{broadcast_text}",
+                f"*📢 Broadcast from admin:*\n\n{_escape_md(broadcast_text)}",
                 parse_mode="Markdown",
             )
             sent += 1

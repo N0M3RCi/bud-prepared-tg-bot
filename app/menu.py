@@ -32,6 +32,11 @@ from app.skills.image_gen import pop_pending_images
 
 logger = logging.getLogger(__name__)
 
+
+def _escape_md(text: str) -> str:
+    """Escape Telegram Markdown special characters in user-provided text."""
+    return text.replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
+
 # ─── Expose router so it can be included by bot.py ───
 menu_router = Router()
 
@@ -1586,7 +1591,7 @@ async def process_pending_action(message: Message, user_id: int, text: str) -> b
     try:
         if action == "web_search":
             result = await execute_tool("web_search", {"query": text})
-            await processing_msg.edit_text(f"🔍 *Search Results*\n\n{result}", parse_mode="Markdown")
+            await processing_msg.edit_text(f"🔍 *Search Results*\n\n{_escape_md(result)}", parse_mode="Markdown")
 
         elif action == "generate_image":
             from app.skills.image_gen import current_user_id as img_ctx
@@ -1631,7 +1636,7 @@ async def process_pending_action(message: Message, user_id: int, text: str) -> b
                     try:
                         await message.bot.send_message(
                             uid,
-                            f"*📢 Broadcast from admin:*\n\n{text}",
+                            f"*📢 Broadcast from admin:*\n\n{_escape_md(text)}",
                             parse_mode="Markdown",
                         )
                         sent += 1
@@ -1778,9 +1783,9 @@ async def process_pending_action(message: Message, user_id: int, text: str) -> b
                                 last = conv.get("last_msg", "")
                                 if last and len(last) > 60:
                                     last = last[:60] + "..."
-                                lines.append(f"  `{conv['id']}` — *{title}* ({msgs} msgs)")
+                                lines.append(f"  `{conv['id']}` — *{_escape_md(title)}* ({msgs} msgs)")
                                 if last:
-                                    lines.append(f"       ↳ {last}")
+                                    lines.append(f"       ↳ {_escape_md(last)}")
 
                         await processing_msg.edit_text("\n".join(lines), parse_mode="Markdown")
                 except ValueError:
