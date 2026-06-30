@@ -1225,8 +1225,12 @@ async def _navigate_page(callback: CallbackQuery, user_id: int, page: str) -> No
             "chat_id": callback.message.chat.id,
             "message_id": callback.message.message_id,
         }
-    except Exception:
-        pass  # Never fallback to answer — single pinned message only
+    except TelegramBadRequest as e:
+        # "not modified" means the content is identical — not an error
+        if "message is not modified" not in str(e).lower():
+            logger.warning("_navigate_page [user=%d] page=%s: %s", user_id, page, e)
+    except Exception as e:
+        logger.warning("_navigate_page [user=%d] page=%s: %s", user_id, page, e)
     await callback.answer()
 
 
