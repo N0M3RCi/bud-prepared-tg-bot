@@ -156,13 +156,19 @@ class Database:
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_done BOOLEAN DEFAULT FALSE
             """)
 
+            # Migrate old default system prompt to new one for existing users
+            await conn.execute("""
+                UPDATE users SET system_prompt = 'You are a helpful AI assistant. IMPORTANT formatting rules for Telegram: Use *bold* for headings and emphasis instead of ## or # markdown — Telegram Markdown does not support heading syntax. You have access to a get_current_time tool that accepts IANA timezone names (e.g., Africa/Accra for Ghana). Use it for time queries instead of asking the user for a city or location.'
+                WHERE system_prompt = 'You are a helpful AI assistant.'
+            """)
+
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
                     username TEXT,
                     first_name TEXT,
                     last_name TEXT,
-                    system_prompt TEXT DEFAULT 'You are a helpful AI assistant.',
+                    system_prompt TEXT DEFAULT 'You are a helpful AI assistant. IMPORTANT formatting rules for Telegram: Use *bold* for headings and emphasis instead of ## or # markdown — Telegram Markdown does not support heading syntax. You have access to a get_current_time tool that accepts IANA timezone names (e.g., Africa/Accra for Ghana). Use it for time queries instead of asking the user for a city or location.',
                     max_context_messages INT DEFAULT 50,
                     max_context_tokens INT DEFAULT 128000,
                     is_blocked BOOLEAN DEFAULT FALSE,

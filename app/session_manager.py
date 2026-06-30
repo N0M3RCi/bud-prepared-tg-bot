@@ -58,7 +58,21 @@ class SessionManager:
     @classmethod
     async def get_system_prompt(cls, user_id: int) -> str:
         user = await cls._get_user_settings_cached(user_id)
-        return user.get("system_prompt", "You are a helpful AI assistant.") if user else "You are a helpful AI assistant."
+        return user.get("system_prompt", (
+            "You are a helpful AI assistant. IMPORTANT formatting rules for Telegram: "
+            "Use *bold* for headings and emphasis instead of ## or # markdown — "
+            "Telegram Markdown does not support heading syntax. "
+            "You have access to a get_current_time tool that accepts IANA timezone names "
+            "(e.g., Africa/Accra for Ghana). Use it for time queries instead of asking "
+            "the user for a city or location."
+        )) if user else (
+            "You are a helpful AI assistant. IMPORTANT formatting rules for Telegram: "
+            "Use *bold* for headings and emphasis instead of ## or # markdown — "
+            "Telegram Markdown does not support heading syntax. "
+            "You have access to a get_current_time tool that accepts IANA timezone names "
+            "(e.g., Africa/Accra for Ghana). Use it for time queries instead of asking "
+            "the user for a city or location."
+        )
 
     @classmethod
     async def get_user_max_messages(cls, user_id: int) -> int:
