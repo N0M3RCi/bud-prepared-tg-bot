@@ -143,6 +143,11 @@ class SessionManager:
             if msg.get("tool_calls_json"):
                 tool_calls_data = json.loads(msg["tool_calls_json"])
                 if tool_calls_data:
+                    # Ensure every tool_call has "type": "function" — the NEAR AI API
+                    # rejects tool_calls entries missing this field
+                    for tcd in tool_calls_data:
+                        if "type" not in tcd:
+                            tcd["type"] = "function"
                     entry["tool_calls"] = tool_calls_data
             context.append(entry)
 

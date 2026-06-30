@@ -1,6 +1,9 @@
+import asyncio
 import asyncpg
+import datetime as _dt
 import logging
-from typing import Optional
+import time
+from typing import Any, Optional
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -8,6 +11,21 @@ logger = logging.getLogger(__name__)
 
 class Database:
     _pool: Optional[asyncpg.Pool] = None
+
+    # ─── Graceful Degradation ─────────────────────────────────────
+    # When the DB goes down, the bot continues serving simple
+    # conversations from in-memory fallback storage. A background
+    # reconnection loop automatically restores the DB connection.
+
+    _degraded: bool = False
+    _reconnect_task: Optional["asyncio.Task[Any]"] = None
+    _degraded_since: float = 0.0
+
+    # In-memory fallback stores
+    _fallback_users: dict[int, dict[str, Any]] = {}
+    _fallback_conversations: dict[int, dict[str, Any]] = {}
+    _fallback_messages: dict[int, list[dict[str, Any]]] = {}  # conv_id -> messages
+    _fallback_next_conv_id: int = 1
 
     @classmethod
     async def connect(cls) -> asyncpg.Pool:
@@ -35,6 +53,91 @@ class Database:
         if cls._pool is None:
             return await cls.connect()
         return cls._pool
+
+    # ─── Degradation API ──────────────────────────────────────────
+
+    @classmethod
+    def is_degraded(cls) -> bool:
+        """Return True if the database is unavailable (in-memory fallback active)."""
+        return cls._degraded
+
+    @classmethod
+    def get_degraded_uptime(cls) -> float:
+        """Seconds since degradation started, or 0 if not degraded."""
+        return time.time() - cls._degraded_since if cls._degraded else 0.0
+
+    @classmethod
+    def _enter_degraded(cls) -> None:
+        if not cls._degraded:
+            cls._degraded = True
+            cls._degraded_since = time.time()
+            logger.error("DATABASE DEGRADED — switching to in-memory fallback")
+
+    @classmethod
+    def _exit_degraded(cls) -> None:
+        if cls._degraded:
+            cls._degraded = False
+            cls._degraded_since = 0.0
+            logger.info("Database reconnected — exiting degraded mode")
+
+    @classmethod
+    async def _attempt_reconnect(cls) -> None:
+        """Background loop: try to reconnect every 10s while degraded."""
+        while cls._degraded:
+            await asyncio.sleep(10)
+            try:
+                pool = await asyncpg.create_pool(
+                    settings.database_url,
+                    min_size=1,
+                    max_size=2,
+                    command_timeout=5,
+                )
+                # Verify with a ping
+                async with pool.acquire() as conn:
+                    await conn.fetchval("SELECT 1")
+                # Close the old pool if it exists but was dead
+                if cls._pool:
+                    try:
+                        await cls._pool.close()
+                    except Exception:
+                        pass
+                cls._pool = pool
+                cls._exit_degraded()
+            except Exception:
+                logger.debug("Reconnect attempt failed — still degraded")
+
+    @classmethod
+    async def _enter_degraded_with_reconnect(cls) -> None:
+        """Enter degraded mode and start the reconnection loop."""
+        cls._enter_degraded()
+        if cls._reconnect_task is None or cls._reconnect_task.done():
+            cls._reconnect_task = asyncio.ensure_future(cls._attempt_reconnect())
+
+    # ─── Fallback Stores ──────────────────────────────────────────
+
+    @classmethod
+    def _set_fallback_user(cls, user_id: int, data: dict) -> None:
+        cls._fallback_users[user_id] = dict(data)
+
+    @classmethod
+    def _get_fallback_user(cls, user_id: int) -> Optional[dict]:
+        return cls._fallback_users.get(user_id)
+
+    @classmethod
+    def _set_fallback_conv(cls, user_id: int, data: dict) -> None:
+        cls._fallback_conversations[user_id] = dict(data)
+
+    @classmethod
+    def _get_fallback_conv(cls, user_id: int) -> Optional[dict]:
+        return cls._fallback_conversations.get(user_id)
+
+    @classmethod
+    def _set_fallback_messages(cls, conv_id: int, messages: list[dict]) -> None:
+        cls._fallback_messages[conv_id] = messages
+
+    @classmethod
+    def _get_fallback_messages(cls, conv_id: int) -> list[dict]:
+        return cls._fallback_messages.get(conv_id, [])
 
     # --- Schema setup ---
 
@@ -164,7 +267,10 @@ class Database:
                 row = await conn.fetchrow(
                     "SELECT * FROM users WHERE user_id = $1", user_id
                 )
-            return dict(row)
+            user_dict = dict(row)
+            # Update fallback cache
+            cls._set_fallback_user(user_id, user_dict)
+            return user_dict
 
     @classmethod
     async def get_preferred_model(cls, user_id: int) -> Optional[str]:
@@ -196,21 +302,36 @@ class Database:
 
     @classmethod
     async def get_user_settings(cls, user_id: int) -> Optional[dict]:
-        pool = await cls.get_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM users WHERE user_id = $1", user_id
-            )
-            return dict(row) if row else None
+        try:
+            pool = await cls.get_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT * FROM users WHERE user_id = $1", user_id
+                )
+                if row:
+                    user_dict = dict(row)
+                    cls._set_fallback_user(user_id, user_dict)
+                    return user_dict
+                return None
+        except Exception as e:
+            logger.warning("DB get_user_settings failed for user %d: %s — using fallback", user_id, e)
+            asyncio.ensure_future(cls._enter_degraded_with_reconnect())
+            return cls._get_fallback_user(user_id)
 
     @classmethod
     async def is_user_blocked(cls, user_id: int) -> bool:
-        pool = await cls.get_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchval(
-                "SELECT is_blocked FROM users WHERE user_id = $1", user_id
-            )
-            return row is True
+        try:
+            pool = await cls.get_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchval(
+                    "SELECT is_blocked FROM users WHERE user_id = $1", user_id
+                )
+                return row is True
+        except Exception as e:
+            logger.warning("DB is_user_blocked failed for user %d: %s — using fallback", user_id, e)
+            asyncio.ensure_future(cls._enter_degraded_with_reconnect())
+            fb = cls._get_fallback_user(user_id)
+            return fb.get("is_blocked", False) if fb else False
 
     @classmethod
     async def set_user_blocked(cls, user_id: int, blocked: bool) -> None:
@@ -261,27 +382,51 @@ class Database:
 
     @classmethod
     async def create_conversation(cls, user_id: int, title: str = "New conversation") -> int:
-        pool = await cls.get_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """INSERT INTO conversations (user_id, title)
-                   VALUES ($1, $2) RETURNING id""",
-                user_id, title,
-            )
-            return row["id"]
+        try:
+            pool = await cls.get_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """INSERT INTO conversations (user_id, title)
+                       VALUES ($1, $2) RETURNING id""",
+                    user_id, title,
+                )
+                conv_id = row["id"]
+                # Cache in fallback
+                cls._set_fallback_conv(user_id, {"id": conv_id, "title": title, "user_id": user_id})
+                return conv_id
+        except Exception as e:
+            logger.warning("DB create_conversation failed for user %d: %s — using in-memory fallback", user_id, e)
+            asyncio.ensure_future(cls._enter_degraded_with_reconnect())
+            # Create in-memory conversation
+            conv_id = cls._fallback_next_conv_id
+            cls._fallback_next_conv_id += 1
+            cls._set_fallback_conv(user_id, {
+                "id": conv_id, "title": title, "user_id": user_id,
+            })
+            cls._fallback_messages[conv_id] = []
+            return conv_id
 
     @classmethod
     async def get_active_conversation(cls, user_id: int) -> Optional[dict]:
-        pool = await cls.get_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """SELECT * FROM conversations
-                   WHERE user_id = $1
-                   ORDER BY updated_at DESC
-                   LIMIT 1""",
-                user_id,
-            )
-            return dict(row) if row else None
+        try:
+            pool = await cls.get_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """SELECT * FROM conversations
+                       WHERE user_id = $1
+                       ORDER BY updated_at DESC
+                       LIMIT 1""",
+                    user_id,
+                )
+                if row:
+                    conv_dict = dict(row)
+                    cls._set_fallback_conv(user_id, conv_dict)
+                    return conv_dict
+                return None
+        except Exception as e:
+            logger.warning("DB get_active_conversation failed for user %d: %s — using fallback", user_id, e)
+            asyncio.ensure_future(cls._enter_degraded_with_reconnect())
+            return cls._get_fallback_conv(user_id)
 
     @classmethod
     async def list_conversations(cls, user_id: int) -> list[dict]:
@@ -301,38 +446,66 @@ class Database:
 
     @classmethod
     async def get_conversation_by_id(cls, conversation_id: int) -> Optional[dict]:
-        pool = await cls.get_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM conversations WHERE id = $1", conversation_id,
-            )
-            return dict(row) if row else None
+        try:
+            pool = await cls.get_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT * FROM conversations WHERE id = $1", conversation_id,
+                )
+                return dict(row) if row else None
+        except Exception as e:
+            logger.warning("DB get_conversation_by_id failed for conv %d: %s — degraded", conversation_id, e)
+            asyncio.ensure_future(cls._enter_degraded_with_reconnect())
+            # Search through fallback conversations
+            for uid, conv in cls._fallback_conversations.items():
+                if conv.get("id") == conversation_id:
+                    return dict(conv)
+            return None
 
     @classmethod
     async def update_conversation_title(cls, conversation_id: int, title: str) -> None:
-        pool = await cls.get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE conversations SET title = $1, updated_at = NOW() WHERE id = $2",
-                title, conversation_id,
-            )
+        try:
+            pool = await cls.get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE conversations SET title = $1, updated_at = NOW() WHERE id = $2",
+                    title, conversation_id,
+                )
+        except Exception as e:
+            logger.warning("DB update_conversation_title failed for conv %d: %s — degraded", conversation_id, e)
+            asyncio.ensure_future(cls._enter_degraded_with_reconnect())
+            # Update fallback title
+            for uid, conv in cls._fallback_conversations.items():
+                if conv.get("id") == conversation_id:
+                    conv["title"] = title
 
     @classmethod
     async def set_active_conversation(cls, user_id: int, conversation_id: int) -> bool:
         """Set a conversation as active by bumping its updated_at."""
-        pool = await cls.get_pool()
-        async with pool.acquire() as conn:
-            # Verify the conversation belongs to this user
-            conv = await conn.fetchrow(
-                "SELECT id FROM conversations WHERE id = $1 AND user_id = $2",
-                conversation_id, user_id,
-            )
-            if not conv:
-                return False
-            await conn.execute(
-                "UPDATE conversations SET updated_at = NOW() WHERE id = $1",
-                conversation_id,
-            )
+        try:
+            pool = await cls.get_pool()
+            async with pool.acquire() as conn:
+                # Verify the conversation belongs to this user
+                conv = await conn.fetchrow(
+                    "SELECT id FROM conversations WHERE id = $1 AND user_id = $2",
+                    conversation_id, user_id,
+                )
+                if not conv:
+                    return False
+                await conn.execute(
+                    "UPDATE conversations SET updated_at = NOW() WHERE id = $1",
+                    conversation_id,
+                )
+                return True
+        except Exception as e:
+            logger.warning("DB set_active_conversation failed for user %d: %s — degraded mode", user_id, e)
+            asyncio.ensure_future(cls._enter_degraded_with_reconnect())
+            # Accept the switch in fallback
+            fb_conv = cls._get_fallback_conv(user_id)
+            if fb_conv and fb_conv.get("id") == conversation_id:
+                return True
+            # We don't track all convs in fallback, so assume it's valid
+            cls._set_fallback_conv(user_id, {"id": conversation_id, "user_id": user_id, "title": "Fallback conversation"})
             return True
 
     # --- Messages ---
@@ -349,20 +522,49 @@ class Database:
         token_count: int = 0,
         tool_calls_json: Optional[str] = None,
     ) -> int:
-        pool = await cls.get_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """INSERT INTO messages
-                       (conversation_id, user_id, role, content, tool_call_id, tool_name, token_count, tool_calls_json)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                   RETURNING id""",
-                conversation_id, user_id, role, content, tool_call_id, tool_name, token_count, tool_calls_json,
+        try:
+            pool = await cls.get_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """INSERT INTO messages
+                           (conversation_id, user_id, role, content, tool_call_id, tool_name, token_count, tool_calls_json)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                       RETURNING id""",
+                    conversation_id, user_id, role, content, tool_call_id, tool_name, token_count, tool_calls_json,
+                )
+                await conn.execute(
+                    "UPDATE conversations SET updated_at = NOW() WHERE id = $1",
+                    conversation_id,
+                )
+                return row["id"]
+        except Exception as e:
+            logger.warning(
+                "DB add_message failed for conv %d: %s — storing in memory",
+                conversation_id, e,
             )
-            await conn.execute(
-                "UPDATE conversations SET updated_at = NOW() WHERE id = $1",
-                conversation_id,
-            )
-            return row["id"]
+            asyncio.ensure_future(cls._enter_degraded_with_reconnect())
+            # Store in-memory
+            import time
+            msg_id = -(int(time.time() * 1000) % 10**9)  # Negative = fallback msg
+            msg = {
+                "id": msg_id,
+                "conversation_id": conversation_id,
+                "user_id": user_id,
+                "role": role,
+                "content": content,
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "token_count": token_count,
+                "tool_calls_json": tool_calls_json,
+                "created_at": None,
+            }
+            msgs = cls._fallback_messages.setdefault(conversation_id, [])
+            msgs.append(msg)
+            # Update fallback conversation timestamp
+            fb_conv = cls._get_fallback_conv(user_id)
+            if fb_conv:
+                fb_conv["updated_at"] = None  # Mark as "updated"
+            return msg_id
 
     @classmethod
     async def get_conversation_messages(
@@ -371,21 +573,29 @@ class Database:
         limit: Optional[int] = None,
         token_budget: Optional[int] = None,
     ) -> list[dict]:
-        pool = await cls.get_pool()
-        async with pool.acquire() as conn:
-            # Use a subquery to get the most recent messages ordered by created_at DESC,
-            # then reverse them so they come out in chronological order
-            if limit or token_budget:
-                if limit:
-                    rows = await conn.fetch(
-                        """SELECT * FROM (
-                            SELECT * FROM messages
-                            WHERE conversation_id = $1
-                            ORDER BY created_at DESC
-                            LIMIT $2
-                        ) sub ORDER BY created_at ASC""",
-                        conversation_id, limit,
-                    )
+        try:
+            pool = await cls.get_pool()
+            async with pool.acquire() as conn:
+                # Use a subquery to get the most recent messages ordered by created_at DESC,
+                # then reverse them so they come out in chronological order
+                if limit or token_budget:
+                    if limit:
+                        rows = await conn.fetch(
+                            """SELECT * FROM (
+                                SELECT * FROM messages
+                                WHERE conversation_id = $1
+                                ORDER BY created_at DESC
+                                LIMIT $2
+                            ) sub ORDER BY created_at ASC""",
+                            conversation_id, limit,
+                        )
+                    else:
+                        rows = await conn.fetch(
+                            """SELECT * FROM messages
+                               WHERE conversation_id = $1
+                               ORDER BY created_at ASC""",
+                            conversation_id,
+                        )
                 else:
                     rows = await conn.fetch(
                         """SELECT * FROM messages
@@ -393,24 +603,27 @@ class Database:
                            ORDER BY created_at ASC""",
                         conversation_id,
                     )
-            else:
-                rows = await conn.fetch(
-                    """SELECT * FROM messages
-                       WHERE conversation_id = $1
-                       ORDER BY created_at ASC""",
-                    conversation_id,
-                )
 
-            messages = [dict(r) for r in rows]
+                messages = [dict(r) for r in rows]
 
-            # Token budget trimming: drop oldest messages until under budget
-            if token_budget and messages:
-                total_tokens = sum(m.get("token_count", 0) for m in messages)
-                while total_tokens > token_budget and len(messages) > 1:
-                    removed = messages.pop(0)
-                    total_tokens -= removed.get("token_count", 0)
+                # Token budget trimming: drop oldest messages until under budget
+                if token_budget and messages:
+                    total_tokens = sum(m.get("token_count", 0) for m in messages)
+                    while total_tokens > token_budget and len(messages) > 1:
+                        removed = messages.pop(0)
+                        total_tokens -= removed.get("token_count", 0)
 
-            return messages
+                # Cache in fallback for degradation mode
+                cls._set_fallback_messages(conversation_id, messages)
+                return messages
+        except Exception as e:
+            logger.warning("DB get_conversation_messages failed for conv %d: %s — using fallback", conversation_id, e)
+            asyncio.ensure_future(cls._enter_degraded_with_reconnect())
+            msgs = cls._get_fallback_messages(conversation_id)
+            if limit and len(msgs) > limit:
+                # Take the most recent 'limit' messages
+                msgs = msgs[-limit:]
+            return msgs
 
     @classmethod
     async def delete_conversation(cls, conversation_id: int) -> None:
@@ -443,29 +656,85 @@ class Database:
             lines.append(f"[{role}]: {content}")
         return "\n\n".join(lines)
 
+    # --- Utility: Search & Data Deletion ---
+
+    @classmethod
+    async def search_user_messages(cls, user_id: int, keyword: str, limit: int = 10) -> list[dict]:
+        """Search a user's messages for a keyword. Returns message previews with conversation titles."""
+        try:
+            pool = await cls.get_pool()
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """SELECT m.id, m.content, m.role, m.created_at, c.id AS conv_id, c.title AS conv_title
+                       FROM messages m
+                       JOIN conversations c ON m.conversation_id = c.id
+                       WHERE c.user_id = $1 AND m.content ILIKE $2
+                       ORDER BY m.created_at DESC
+                       LIMIT $3""",
+                    user_id, f"%{keyword}%", limit,
+                )
+                return [dict(r) for r in rows]
+        except Exception as e:
+            logger.warning("DB search_user_messages failed for user %d: %s", user_id, e)
+            return []
+
+    @classmethod
+    async def delete_user_data(cls, user_id: int) -> int:
+        """Delete all data for a user across all tables. Returns number of deleted conversations."""
+        try:
+            pool = await cls.get_pool()
+            async with pool.acquire() as conn:
+                # Delete feedback
+                await conn.execute("DELETE FROM feedback WHERE user_id = $1", user_id)
+                # Delete usage stats
+                await conn.execute("DELETE FROM usage_stats WHERE user_id = $1", user_id)
+                # Delete rate limits
+                await conn.execute("DELETE FROM rate_limits WHERE user_id = $1", user_id)
+                # Delete conversations (cascades to messages, summaries)
+                result = await conn.execute(
+                    "DELETE FROM conversations WHERE user_id = $1", user_id,
+                )
+                # Delete user
+                await conn.execute("DELETE FROM users WHERE user_id = $1", user_id)
+                # asyncpg returns "DELETE N" string
+                deleted = int(result.split()[-1]) if result else 0
+                return deleted
+        except Exception as e:
+            logger.warning("DB delete_user_data failed for user %d: %s", user_id, e)
+            return 0
+
     # --- Conversation Summaries ---
 
     @classmethod
     async def save_conversation_summary(cls, conversation_id: int, summary: str) -> None:
-        pool = await cls.get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO conversation_summaries (conversation_id, summary) VALUES ($1, $2)",
-                conversation_id, summary,
-            )
+        try:
+            pool = await cls.get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO conversation_summaries (conversation_id, summary) VALUES ($1, $2)",
+                    conversation_id, summary,
+                )
+        except Exception as e:
+            logger.warning("DB save_conversation_summary failed for conv %d: %s — degraded", conversation_id, e)
+            asyncio.ensure_future(cls._enter_degraded_with_reconnect())
 
     @classmethod
     async def get_latest_summary(cls, conversation_id: int) -> Optional[str]:
-        pool = await cls.get_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """SELECT summary FROM conversation_summaries
-                   WHERE conversation_id = $1
-                   ORDER BY created_at DESC
-                   LIMIT 1""",
-                conversation_id,
-            )
-            return row["summary"] if row else None
+        try:
+            pool = await cls.get_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """SELECT summary FROM conversation_summaries
+                       WHERE conversation_id = $1
+                       ORDER BY created_at DESC
+                       LIMIT 1""",
+                    conversation_id,
+                )
+                return row["summary"] if row else None
+        except Exception as e:
+            logger.warning("DB get_latest_summary failed for conv %d: %s — degraded", conversation_id, e)
+            asyncio.ensure_future(cls._enter_degraded_with_reconnect())
+            return None  # No fallback for summaries — safe to skip
 
     # --- Usage Stats ---
 
@@ -478,36 +747,44 @@ class Database:
         images: int = 0,
         searches: int = 0,
     ) -> None:
-        pool = await cls.get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """INSERT INTO usage_stats (user_id, date, requests, tokens_in, tokens_out, images_generated, searches_performed)
-                   VALUES ($1, CURRENT_DATE, 1, $2, $3, $4, $5)
-                   ON CONFLICT (user_id, date)
-                   DO UPDATE SET
-                       requests = usage_stats.requests + 1,
-                       tokens_in = usage_stats.tokens_in + $2,
-                       tokens_out = usage_stats.tokens_out + $3,
-                       images_generated = usage_stats.images_generated + $4,
-                       searches_performed = usage_stats.searches_performed + $5""",
-                user_id, tokens_in, tokens_out, images, searches,
-            )
+        try:
+            pool = await cls.get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """INSERT INTO usage_stats (user_id, date, requests, tokens_in, tokens_out, images_generated, searches_performed)
+                       VALUES ($1, CURRENT_DATE, 1, $2, $3, $4, $5)
+                       ON CONFLICT (user_id, date)
+                       DO UPDATE SET
+                           requests = usage_stats.requests + 1,
+                           tokens_in = usage_stats.tokens_in + $2,
+                           tokens_out = usage_stats.tokens_out + $3,
+                           images_generated = usage_stats.images_generated + $4,
+                           searches_performed = usage_stats.searches_performed + $5""",
+                    user_id, tokens_in, tokens_out, images, searches,
+                )
+        except Exception as e:
+            logger.debug("DB record_usage failed for user %d: %s — skipped (non-critical)", user_id, e)
+            # Don't enter degraded mode for analytics — non-critical path
 
     @classmethod
     async def get_user_usage_today(cls, user_id: int) -> dict:
-        pool = await cls.get_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """SELECT COALESCE(requests, 0) AS requests,
-                          COALESCE(tokens_in, 0) AS tokens_in,
-                          COALESCE(tokens_out, 0) AS tokens_out,
-                          COALESCE(images_generated, 0) AS images_generated
-                   FROM usage_stats
-                   WHERE user_id = $1 AND date = CURRENT_DATE""",
-                user_id,
-            )
-            if row:
-                return dict(row)
+        try:
+            pool = await cls.get_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """SELECT COALESCE(requests, 0) AS requests,
+                              COALESCE(tokens_in, 0) AS tokens_in,
+                              COALESCE(tokens_out, 0) AS tokens_out,
+                              COALESCE(images_generated, 0) AS images_generated
+                       FROM usage_stats
+                       WHERE user_id = $1 AND date = CURRENT_DATE""",
+                    user_id,
+                )
+                if row:
+                    return dict(row)
+                return {"requests": 0, "tokens_in": 0, "tokens_out": 0, "images_generated": 0}
+        except Exception as e:
+            logger.debug("DB get_user_usage_today failed for user %d: %s — returning 0", user_id, e)
             return {"requests": 0, "tokens_in": 0, "tokens_out": 0, "images_generated": 0}
 
     @classmethod
@@ -565,11 +842,10 @@ class Database:
             window_start = row["window_start"]
             count = row["request_count"]
 
-            # Check if window has expired
-            expired = await conn.fetchval(
-                "SELECT $1 < NOW() - interval '1 second' * $2",
-                window_start, window_sec,
-            )
+            # Check if window has expired — use Python comparison to avoid
+            # asyncpg datetime codec issues when passing datetime to SQL
+            now = _dt.datetime.now(_dt.timezone.utc)
+            expired = (window_start + _dt.timedelta(seconds=window_sec)) < now
             if expired:
                 # Reset window
                 await conn.execute(
@@ -586,6 +862,32 @@ class Database:
                 user_id,
             )
             return True
+
+    @classmethod
+    async def get_rate_limit_remaining(cls, user_id: int) -> int:
+        """Return the number of seconds remaining until the rate limit window resets.
+        Returns 0 if no rate limit is active or the window has already expired."""
+        try:
+            pool = await cls.get_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT window_start, request_count FROM rate_limits WHERE user_id = $1",
+                    user_id,
+                )
+                if not row:
+                    return 0
+
+                window_sec = settings.rate_limit_window_seconds
+                now = _dt.datetime.now(_dt.timezone.utc)
+                expired = (row["window_start"] + _dt.timedelta(seconds=window_sec)) < now
+                if expired:
+                    return 0
+
+                remaining = max(0, int((row["window_start"] + _dt.timedelta(seconds=window_sec) - now).total_seconds()))
+                return remaining
+        except Exception as e:
+            logger.debug("DB get_rate_limit_remaining failed for user %d: %s", user_id, e)
+            return 0
 
     # --- Feedback ---
 
@@ -821,12 +1123,23 @@ class Database:
 
     @classmethod
     async def ping(cls) -> bool:
-        """Check if the database connection is alive."""
+        """Check if the database connection is alive.
+
+        If the DB is down while we already have in-memory fallback data,
+        enters degraded mode and starts a background reconnection loop.
+        If the DB comes back up while in degraded mode, exits degraded
+        mode automatically.
+        """
         try:
             pool = await cls.get_pool()
             async with pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
+            # If we were degraded, exit degraded mode
+            if cls._degraded:
+                cls._exit_degraded()
             return True
         except Exception as e:
             logger.warning("Database ping failed: %s", e)
+            # Enter degraded mode and start reconnection loop
+            asyncio.ensure_future(cls._enter_degraded_with_reconnect())
             return False

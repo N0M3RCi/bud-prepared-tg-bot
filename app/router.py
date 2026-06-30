@@ -275,6 +275,7 @@ async def _check_rate_limit(user_id: int, message: Message) -> bool:
     # Check rate limit window
     allowed = await Database.check_rate_limit(user_id)
     if not allowed:
+        remaining = await Database.get_rate_limit_remaining(user_id)
         asyncio.ensure_future(report_error(
             user_id=user_id,
             error_type="rate_limited",
@@ -282,7 +283,7 @@ async def _check_rate_limit(user_id: int, message: Message) -> bool:
         ))
         await _reply_or_answer(message,
             f"You're sending too many requests. "
-            f"Please wait {settings.rate_limit_window_seconds} seconds between requests."
+            f"Please wait {remaining} seconds before sending another request."
         )
         return True
 
@@ -472,6 +473,8 @@ CMD_CALC = Command("calc", "calculate", "math")
 CMD_PING = Command("ping")
 CMD_MODEL = Command("model")
 CMD_FEEDBACK = Command("feedback", "suggest")
+CMD_FIND = Command("find", "searchconv")
+CMD_DELETE_MY_DATA = Command("delete_my_data")
 CMD_ADMIN_FEEDBACK = Command("admin_feedback")
 CMD_ADMIN_CLEAR_FEEDBACK = Command("admin_clear_feedback")
 
@@ -583,11 +586,15 @@ _COMMAND_CATEGORIES: dict[str, list[tuple[str, str]]] = {
     "Customization": [
         ("/prompt [text]", "View or set your custom system prompt"),
         ("/settings", "View your current settings"),
+        ("/find <keyword>", "Search your conversation history"),
     ],
     "Quick Actions": [
         ("/search <query>", "Search the web instantly"),
         ("/imagine <prompt>", "Generate an image from a description"),
         ("/calc <expression>", "Calculate a math expression"),
+    ],
+    "Privacy": [
+        ("/delete_my_data", "Delete all your data from the bot"),
     ],
 }
 
@@ -688,6 +695,19 @@ _COMMAND_DETAILS: dict[str, str] = {
         "Send feedback, bug reports, or suggestions directly to the bot admin.\n"
         "Your message is stored and can be reviewed by admins.\n"
         "Usage: /feedback <your message>"
+    ),
+    "find": (
+        "Search your conversation history for matching messages.\n"
+        "Returns up to 10 matching results with conversation context.\n"
+        "Aliases: /searchconv\n"
+        "Usage: /find <keyword>\n"
+        "Example: /find python"
+    ),
+    "delete_my_data": (
+        "Permanently delete all your data from the bot, including all\n"
+        "conversations, messages, usage stats, and feedback.\n"
+        "This action cannot be undone.\n"
+        "Usage: /delete_my_data"
     ),
     "admin_stats": (
         "View bot-wide statistics including total users, active users,\n"
@@ -1210,6 +1230,99 @@ async def cmd_feedback(message: Message) -> None:
         await _reply_or_answer(message,"Thank you for your feedback! It has been sent to the bot admin.")
     else:
         await _reply_or_answer(message,"Thank you for your feedback! It has been recorded.")
+
+
+# ─── Find Command ───
+
+@router.message(CMD_FIND)
+async def cmd_find(message: Message) -> None:
+    """Search the user's conversation history for a keyword."""
+    user_id = message.from_user.id
+    text = message.text or ""
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2:
+        await _reply_or_answer(message,
+            "Usage: /find <keyword>\n"
+            "Example: `/find python`\n\n"
+            "Searches all your conversations for matching messages.",
+            parse_mode="Markdown",
+        )
+        return
+
+    keyword = parts[1].strip()
+    blocked = await Database.is_user_blocked(user_id)
+    if blocked:
+        await _reply_or_answer(message,"Your account has been blocked.")
+        return
+
+    _log_request(user_id, "find", keyword=keyword[:50])
+    results = await Database.search_user_messages(user_id, keyword, limit=10)
+
+    if not results:
+        await _reply_or_answer(message,
+            f"No matches found for `{_escape_md(keyword)}` in your conversations.",
+            parse_mode="Markdown",
+        )
+        return
+
+    lines = [f"*Search results for:* `{_escape_md(keyword)}`", ""]
+    for r in results:
+        role = r["role"].upper()
+        content = r["content"][:120]
+        conv_title = r.get("conv_title", "Untitled")[:30]
+        ts = r["created_at"].strftime("%m-%d %H:%M") if r.get("created_at") else ""
+        safe_title = _escape_md(conv_title)
+        safe_content = _escape_md(content)
+        lines.append(f"💬 *{safe_title}* — {role} [{ts}]")
+        lines.append(f"  `{safe_content}{'...' if len(r['content']) > 120 else ''}`")
+        lines.append("")
+
+    await _reply_or_answer(message, "\n".join(lines), parse_mode="Markdown")
+
+
+# ─── Delete My Data ───
+
+@router.message(CMD_DELETE_MY_DATA)
+async def cmd_delete_my_data(message: Message) -> None:
+    """Permanently delete all user data."""
+    user_id = message.from_user.id
+
+    # In groups, don't allow this
+    if _is_group_chat(message):
+        await _reply_or_answer(message,
+            "Please run this command in a private chat with me."
+        )
+        return
+
+    text = message.text or ""
+    parts = text.split(maxsplit=1)
+    confirmation = parts[1].strip().lower() if len(parts) > 1 else ""
+
+    if confirmation != "yes":
+        await _reply_or_answer(message,
+            "⚠️ *Delete All My Data*\n\n"
+            "This will permanently delete all your conversations, messages, "
+            "usage stats, and feedback. This cannot be undone.\n\n"
+            "To confirm, send:\n"
+            "`/delete_my_data yes`",
+            parse_mode="Markdown",
+        )
+        return
+
+    _log_request(user_id, "delete_my_data")
+    deleted = await Database.delete_user_data(user_id)
+    # Clean up in-memory state
+    _pending_menu_action.pop(user_id, None)
+    _last_user_message.pop(user_id, None)
+    _processing.discard(user_id)
+    bust_cache(user_id)
+    logger.info("[user=%d] Deleted all data (%d conversations)", user_id, deleted)
+
+    await _reply_or_answer(message,
+        "✅ All your data has been deleted. Your conversations, messages, "
+        "and usage history are gone.\n\n"
+        "Send /start to use the bot again."
+    )
 
 
 # ─── Admin Feedback Commands ───
@@ -1750,6 +1863,7 @@ async def cmd_admin_diag(message: Message) -> None:
         "*🩺 System Diagnostics*",
         "",
         f"*⏱️ Uptime:* {uptime_h}h {uptime_m}m",
+        f"*🟡 Degraded:* {'YES (DB fallback)' if Database.is_degraded() else 'No'}",
         f"*💾 DB Pool:* {db_stats.get('status', '?')} | "
         f"{db_stats.get('free', 0)}/{db_stats.get('pool_size', 0)} free "
         f"(min={db_stats.get('min_size', '?')}, max={db_stats.get('max_size', '?')})",
@@ -2146,6 +2260,84 @@ async def handle_message(message: Message) -> None:
         _recent_messages[content_key] = time.time()
 
 
+# ─────────────────────────── Voice Message Handler ───────────────────────────
+
+@router.message(F.voice)
+async def handle_voice(message: Message) -> None:
+    """Handle voice messages: transcribe via STT then process as text."""
+    user_id = message.from_user.id
+
+    # Group chat support — only respond when mentioned or replied to
+    if not await _should_respond_in_group(message):
+        return
+
+    blocked = await Database.is_user_blocked(user_id)
+    if blocked:
+        await _reply_or_answer(message, "Your account has been blocked. Contact an admin.")
+        return
+
+    if user_id in _processing:
+        await _reply_or_answer(message, "Please wait for the current request to finish.")
+        return
+
+    if await _check_rate_limit(user_id, message):
+        return
+
+    _processing.add(user_id)
+    _log_request(user_id, "voice")
+
+    try:
+        # Download the voice file
+        voice = message.voice
+        file = await message.bot.get_file(voice.file_id)
+        if not file.file_path:
+            _processing.discard(user_id)
+            await _reply_or_answer(message, "Could not access voice message.")
+            return
+
+        os.makedirs("/tmp/bot_downloads", exist_ok=True)
+        local_path = os.path.join(
+            "/tmp/bot_downloads", f"voice_{user_id}_{int(time.time())}.ogg",
+        )
+        await message.bot.download_file(file.file_path, destination=local_path)
+
+        # Send processing status
+        status_msg = await message.bot.send_message(
+            message.chat.id, "🎤 Transcribing your voice message...",
+        )
+
+        # Transcribe
+        transcribed = await LLMClient.transcribe_audio(local_path)
+        if not transcribed:
+            _processing.discard(user_id)
+            await status_msg.edit_text(
+                "❌ Could not transcribe your voice message. "
+                "Please try sending it again or type your message instead."
+            )
+            return
+
+        await status_msg.edit_text(f"🎤 \"{transcribed[:100]}{'...' if len(transcribed) > 100 else ''}\"")
+
+        # Process the transcribed text as a normal message
+        _last_user_message[user_id] = transcribed
+        await _process_text_response(message, transcribed)
+
+    except Exception as e:
+        logger.error("[user=%d] Voice handler error: %s", user_id, e)
+        asyncio.ensure_future(report_error(
+            user_id=user_id, error_type="voice_error",
+            details=f"Voice processing failed: {e}",
+        ))
+        await _reply_or_answer(message, "Sorry, an error occurred while processing your voice message.")
+    finally:
+        _processing.discard(user_id)
+        # Clean up temp file
+        try:
+            os.remove(local_path)
+        except Exception:
+            pass
+
+
 # ─────────────────────────── Unsupported Message Handler ───────────────────────────
 
 @router.message(~F.text)
@@ -2161,9 +2353,7 @@ async def handle_unsupported(message: Message) -> None:
     if blocked:
         return
 
-    if message.voice:
-        await _reply_or_answer(message,"Voice messages are not supported yet. Please send text or a file.")
-    elif message.video or message.video_note:
+    if message.video or message.video_note:
         await _reply_or_answer(message,"Video messages are not supported. Please send text or a file.")
     elif message.sticker:
         await _reply_or_answer(message,"Sticker received! I can't process stickers, but feel free to send text.")
@@ -2263,10 +2453,17 @@ async def _process_text_response(message: Message, user_text: str) -> str:
             if full_response:
                 await SessionManager.save_assistant_response(conv_id, user_id, full_response)
 
-            # Trigger compression asynchronously
+            # Auto-title: if the conversation still has the default title,
+            # fire-and-forget a lightweight LLM call to generate a short title.
             all_msgs = await Database.get_conversation_messages(conv_id, limit=None)
-            if len(all_msgs) > COMPRESS_AFTER_MESSAGES:
-                asyncio.ensure_future(SessionManager.compress_context(user_id, conv_id))
+            if len(all_msgs) >= 3:
+                # Check current title
+                conv = await Database.get_conversation_by_id(conv_id)
+                if conv and conv.get("title", "").strip().lower() in ("new conversation", ""):
+                    asyncio.ensure_future(_auto_title_conv(conv_id, user_id, all_msgs))
+                # Trigger compression asynchronously
+                if len(all_msgs) > COMPRESS_AFTER_MESSAGES:
+                    asyncio.ensure_future(SessionManager.compress_context(user_id, conv_id))
             break
 
         # Tool call iteration
@@ -2305,6 +2502,43 @@ async def _process_text_response(message: Message, user_text: str) -> str:
         await _send_long_message(message, full_response)
 
     return full_response
+
+
+async def _auto_title_conv(conv_id: int, user_id: int, messages: list[dict]) -> None:
+    """Fire-and-forget: ask the LLM to generate a short title for a conversation.
+
+    Uses the first few messages to generate a concise 3-5 word title.
+    Runs in the background so the user doesn't wait for it.
+    """
+    try:
+        # Build a mini context from the messages
+        lines = []
+        for m in messages[:5]:
+            role = m["role"].upper()
+            content = m["content"][:150]
+            lines.append(f"[{role}]: {content}")
+        context = "\n".join(lines)
+
+        title_prompt = [
+            {"role": "system", "content": "Generate a short, descriptive title (3-5 words) for this conversation. Respond with ONLY the title, no quotes, no punctuation, no explanation."},
+            {"role": "user", "content": f"Conversation:\n{context}\n\nTitle:"},
+        ]
+
+        llm_response = await LLMClient.chat_completion(
+            messages=title_prompt,
+            temperature=0.2,
+            max_tokens=30,
+            model=settings.fast_model,
+        )
+        title = llm_response.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        if title and len(title) >= 3 and len(title) <= 60:
+            # Clean up: remove quotes, trailing punctuation
+            title = title.strip("\"'").strip(".,!?:;")
+            if title:
+                await Database.update_conversation_title(conv_id, title[:60])
+                logger.info("[user=%d] Auto-titled conv %d: %s", user_id, conv_id, title)
+    except Exception as e:
+        logger.debug("Auto-title failed for conv %d: %s", conv_id, e)
 
 
 async def _select_fast_model(user_text: str, user_id: int) -> str:

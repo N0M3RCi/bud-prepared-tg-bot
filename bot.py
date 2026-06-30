@@ -87,6 +87,62 @@ def _clean_directory(now: float, directory: str, max_age: int) -> int:
     return count
 
 
+async def _webhook_self_test() -> None:
+    """Periodically verify the bot's webhook is healthy and responsive.
+
+    Every 10 minutes:
+    - Checks webhook info (URL, pending count) if in webhook mode
+    - Logs warnings for anomalies
+    - Helps detect dead or misconfigured webhooks early.
+    """
+    await asyncio.sleep(300)  # Initial delay to let startup settle
+    while True:
+        await asyncio.sleep(600)  # Every 10 minutes
+        try:
+            from app.router import router
+            bot = None
+            # We need a Bot instance — get it from settings
+            from aiogram import Bot
+            from aiogram.client.default import DefaultBotProperties
+            from aiogram.enums import ParseMode
+            bot = Bot(
+                token=settings.bot_token,
+                default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
+            )
+            try:
+                # Check bot self-info (liveness)
+                me = await bot.get_me()
+                logger.info("[watchdog] Bot @%s self-check OK", me.username or "?")
+
+                if settings.use_webhook:
+                    # Check webhook configuration
+                    info = await bot.get_webhook_info()
+                    if info.url != settings.webhook_url.rstrip("/") + settings.webhook_path:
+                        logger.warning(
+                            "[watchdog] Webhook URL mismatch: expected '%s', got '%s'",
+                            settings.webhook_url.rstrip("/") + settings.webhook_path,
+                            info.url,
+                        )
+                    if info.pending_update_count and info.pending_update_count > 10:
+                        logger.warning(
+                            "[watchdog] %d pending updates on webhook — possible processing backlog",
+                            info.pending_update_count,
+                        )
+                    if info.last_error_date and info.last_error_message:
+                        logger.warning(
+                            "[watchdog] Webhook last error: %s (at %s)",
+                            info.last_error_message, info.last_error_date,
+                        )
+                    else:
+                        logger.info("[watchdog] Webhook check OK: %s", info.url)
+                else:
+                    logger.info("[watchdog] Polling mode — no webhook to verify")
+            finally:
+                await bot.session.close()
+        except Exception as e:
+            logger.error("[watchdog] Self-test failed: %s", e)
+
+
 async def _cleanup_stale_files(interval: int = 300, max_age: int = 3600) -> None:
     """Periodically delete stale temp files across all temp directories."""
     dirs = ["/tmp/bot_downloads", "/tmp/bot_images"]
@@ -147,6 +203,8 @@ async def on_startup(bot: Bot) -> None:
             BotCommand(command="delete_conv", description="Delete a conversation"),
             BotCommand(command="export", description="Export conversation"),
             BotCommand(command="feedback", description="Send feedback or suggestions"),
+            BotCommand(command="find", description="Search your conversation history"),
+            BotCommand(command="delete_my_data", description="Delete all your data"),
         ]
         await bot.set_my_commands(public_commands)
 
@@ -190,6 +248,7 @@ async def on_startup(bot: Bot) -> None:
     # Start background tasks common to both modes
     _start_background_task(_db_keepalive())
     _start_background_task(_cleanup_stale_files())
+    _start_background_task(_webhook_self_test())
 
     if settings.use_webhook:
         logger.info(
@@ -265,12 +324,16 @@ async def _health_check_server() -> None:
                 return
 
             db_ok = await Database.ping()
-            status = 200 if db_ok else 503
+            degraded = Database.is_degraded()
+            status = 503 if (not db_ok and not degraded) else 200
+            status_label = "ok"
+            if not db_ok:
+                status_label = "degraded" if degraded else "down"
             body = (
-                f'{{"status":"{"ok" if db_ok else "degraded"}","uptime":{uptime}}}'
+                f'{{"status":"{status_label}","uptime":{uptime},"degraded":{str(degraded).lower()}}}'
             ).encode()
             writer.write(
-                f"HTTP/1.1 {status} {'OK' if db_ok else 'Service Unavailable'}\r\n"
+                f"HTTP/1.1 {status} {'OK' if status == 200 else 'Service Unavailable'}\r\n"
                 f"Content-Type: application/json\r\n"
                 f"Content-Length: {len(body)}\r\n"
                 f"Connection: close\r\n\r\n".encode() + body
@@ -336,8 +399,12 @@ async def _health_handler(request):
             content_type="application/json",
         )
     db_ok = await Database.ping()
-    status = 200 if db_ok else 503
-    body = json.dumps({"status": "ok" if db_ok else "degraded", "uptime": uptime})
+    degraded = Database.is_degraded()
+    status = 503 if (not db_ok and not degraded) else 200
+    status_label = "ok"
+    if not db_ok:
+        status_label = "degraded" if degraded else "down"
+    body = json.dumps({"status": status_label, "uptime": uptime, "degraded": degraded})
     return aiohttp.web.Response(
         status=status,
         body=body,
@@ -356,12 +423,22 @@ async def _run_webhook(bot: Bot, dp: Dispatcher) -> None:
     # Build aiohttp app with health check + webhook handler
     app = aiohttp.web.Application()
 
-    # Health check endpoint
-    app.router.add_get("/", _health_handler)
+    # Register lifecycle on the Dispatcher FIRST, before any webhook handler
+    # setup, so aiogram manages signal ordering internally and avoids the
+    # "frozen router" conflict. Also register shutdown on the aiohttp app
+    # so cleanup runs when the server stops.
+    dp.startup.register(on_startup)
+    app.on_shutdown.append(lambda _: on_shutdown(bot))
+
+    # Manually emit startup so lifecycle runs before the webhook server
+    # starts accepting requests (aiogram's SimpleRequestHandler does not
+    # auto-emit dp.startup in webhook mode).
+    await dp.startup.emit(bot=bot)
+    logger.info("Dispatcher startup emitted.")
 
     # Webhook POST route — uses aiogram's official handler which
     # validates secret token, resolves Bot instance, and feeds updates
-    # to the Dispatcher. Also registers session cleanup on shutdown.
+    # to the Dispatcher.
     webhook_handler = SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
@@ -369,11 +446,8 @@ async def _run_webhook(bot: Bot, dp: Dispatcher) -> None:
     )
     webhook_handler.register(app, path=settings.webhook_path)
 
-    # Register lifecycle hooks directly on the aiohttp app so they fire
-    # when the server starts/stops (avoids conflict with aiogram's own
-    # lifecycle signals and the "frozen router" issue).
-    app.on_startup.append(lambda _: on_startup(bot))
-    app.on_shutdown.append(lambda _: on_shutdown(bot))
+    # Health check endpoint
+    app.router.add_get("/", _health_handler)
 
     # Start the server
     runner = aiohttp.web.AppRunner(app)

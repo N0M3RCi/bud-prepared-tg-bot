@@ -20,7 +20,8 @@ TOOL_DEFINITION = {
         "description": (
             "Read and analyze the contents of an uploaded file. "
             "Supports: PDF documents, images (analyzed with AI vision), "
-            "text files, code files, JSON, CSV, and common document formats."
+            "text files, code files, JSON, CSV, DOCX (Word), XLSX (Excel), "
+            "and common document formats."
         ),
         "parameters": {
             "type": "object",
@@ -31,7 +32,7 @@ TOOL_DEFINITION = {
                 },
                 "file_type": {
                     "type": "string",
-                    "description": "The type of file: pdf, image, text, code, json, csv, or auto (auto-detect)",
+                    "description": "The type of file: pdf, image, text, code, json, csv, docx, xlsx, or auto (auto-detect)",
                     "default": "auto",
                 },
                 "analysis_prompt": {
@@ -82,6 +83,10 @@ async def read_file(file_path: str, file_type: str = "auto",
             return await _read_pdf(file_path)
         elif detected_type in ("text", "code", "json", "csv"):
             return await _read_text_file(file_path, detected_type)
+        elif detected_type == "docx":
+            return await _read_docx(file_path)
+        elif detected_type == "xlsx":
+            return await _read_xlsx(file_path)
         else:
             text = await _read_text_file(file_path, "text")
             if text.startswith("Error"):
@@ -97,6 +102,8 @@ def _detect_type(ext: str) -> str:
         ".jpg": "image", ".jpeg": "image", ".png": "image", ".gif": "image",
         ".webp": "image", ".bmp": "image", ".tiff": "image",
         ".pdf": "pdf",
+        ".docx": "docx",
+        ".xlsx": "xlsx",
         ".txt": "text", ".md": "text", ".rst": "text",
         ".py": "code", ".js": "code", ".ts": "code", ".jsx": "code",
         ".tsx": "code", ".java": "code", ".c": "code", ".cpp": "code",
@@ -162,6 +169,88 @@ async def _read_pdf(file_path: str) -> str:
             return f"Error reading PDF: {e}"
 
     return await loop.run_in_executor(None, _read_pdf_sync)
+
+
+async def _read_docx(file_path: str) -> str:
+    """Extract text from a .docx Word document in a thread executor."""
+    loop = asyncio.get_running_loop()
+
+    def _read_sync() -> str:
+        try:
+            from docx import Document  # type: ignore[import-untyped]
+        except ImportError:
+            return "DOCX reading requires python-docx. Install it with: pip install python-docx"
+
+        try:
+            doc = Document(file_path)
+            paragraphs = [p.text for p in doc.paragraphs]
+            full_text = "\n".join(paragraphs)
+
+            # Also extract tables
+            tables_text = []
+            for table in doc.tables:
+                rows = []
+                for row in table.rows:
+                    cells = [cell.text.strip() for cell in row.cells]
+                    rows.append(" | ".join(cells))
+                tables_text.append("\n".join(rows))
+            if tables_text:
+                full_text += "\n\n--- Tables ---\n" + "\n\n".join(tables_text)
+
+            if not full_text.strip():
+                return "The DOCX file appears to contain no text."
+
+            max_chars = settings.file_reader_max_chars
+            if len(full_text) > max_chars:
+                full_text = full_text[:max_chars] + "\n\n... [file truncated]"
+
+            return f"DOCX Document Contents:\n\n{full_text}"
+        except Exception as e:
+            return f"Error reading DOCX file: {e}"
+
+    return await loop.run_in_executor(None, _read_sync)
+
+
+async def _read_xlsx(file_path: str) -> str:
+    """Extract text from an .xlsx Excel spreadsheet in a thread executor."""
+    loop = asyncio.get_running_loop()
+
+    def _read_sync() -> str:
+        try:
+            from openpyxl import load_workbook  # type: ignore[import-untyped]
+        except ImportError:
+            return "XLSX reading requires openpyxl. Install it with: pip install openpyxl"
+
+        try:
+            wb = load_workbook(file_path, read_only=True, data_only=True)
+            parts = []
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                rows = []
+                row_count = 0
+                for row in ws.iter_row(values_only=True):
+                    row_count += 1
+                    cleaned = [str(c) if c is not None else "" for c in row]
+                    rows.append(" | ".join(cleaned))
+                sheet_text = f"--- Sheet: {sheet_name} ({row_count} rows) ---\n"
+                sheet_text += "\n".join(rows)
+                parts.append(sheet_text)
+
+            wb.close()
+            full_text = "\n\n".join(parts)
+
+            if not full_text.strip():
+                return "The XLSX file appears to contain no data."
+
+            max_chars = settings.file_reader_max_chars
+            if len(full_text) > max_chars:
+                full_text = full_text[:max_chars] + "\n\n... [file truncated]"
+
+            return f"XLSX Spreadsheet Contents:\n\n{full_text}"
+        except Exception as e:
+            return f"Error reading XLSX file: {e}"
+
+    return await loop.run_in_executor(None, _read_sync)
 
 
 async def _analyze_image(file_path: str, analysis_prompt: str) -> str:

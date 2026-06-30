@@ -118,11 +118,14 @@ class LLMClient:
                             if idx not in tool_calls_acc:
                                 tool_calls_acc[idx] = {
                                     "id": "",
+                                    "type": "function",
                                     "function": {"name": "", "arguments": ""},
                                 }
                             entry = tool_calls_acc[idx]
                             if tc.get("id"):
                                 entry["id"] = tc["id"]
+                            if tc.get("type"):
+                                entry["type"] = tc["type"]
                             if tc.get("function"):
                                 fn = tc["function"]
                                 if fn.get("name"):
@@ -236,6 +239,37 @@ class LLMClient:
                     logger.error("Image gen failed after %d attempts: %s", IMAGE_RETRIES, e)
 
         return None
+
+    @classmethod
+    async def transcribe_audio(cls, file_path: str) -> Optional[str]:
+        """Transcribe an audio file using the NEAR AI Cloud's OpenAI-compatible
+        audio transcription endpoint (Whisper).
+
+        Args:
+            file_path: Local path to the audio file (e.g. OGG from Telegram voice).
+
+        Returns:
+            Transcribed text, or None on failure.
+        """
+        client = cls.get_client()
+        try:
+            audio_file = await asyncio.to_thread(open, file_path, "rb")
+            try:
+                response = await client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file,
+                    response_format="text",
+                )
+                text = response.strip() if response else ""
+                return text or None
+            finally:
+                try:
+                    audio_file.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning("Audio transcription failed: %s", e)
+            return None
 
     @classmethod
     async def count_tokens(cls, text: str) -> int:
