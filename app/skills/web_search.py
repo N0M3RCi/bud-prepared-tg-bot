@@ -79,16 +79,63 @@ async def web_search(query: str, max_results: int = 5) -> str:
         def _search() -> dict:
             return client.search(
                 query=query,
-                max_results=min(max_results, 10),
+                max_results=min(max_results + 3, 10),
                 search_depth="advanced",
                 days=2 if is_latest else _DAYS,
             )
 
         response = await loop.run_in_executor(None, _search)
-        results = response.get("results", [])
+        raw_results = response.get("results", [])
 
-        if not results:
+        if not raw_results:
             return f"No results found for '{query}'."
+
+        if is_latest:
+            # Parse dates and bucket results by recency
+            today_d = datetime.date.today()
+            yesterday_d = today_d - datetime.timedelta(days=1)
+
+            def _parse_date(entry: dict) -> datetime.date | None:
+                raw = entry.get("published_date", "")
+                if not raw:
+                    return None
+                raw = raw.split("T")[0].split(" ")[0]
+                try:
+                    parts = raw.split("-")
+                    if len(parts) == 3:
+                        return datetime.date(int(parts[0]), int(parts[1]), int(parts[2]))
+                except (ValueError, IndexError):
+                    pass
+                return None
+
+            today_results: list[dict] = []
+            yesterday_results: list[dict] = []
+            older_results: list[dict] = []
+
+            for r in raw_results:
+                d = _parse_date(r)
+                if d == today_d:
+                    today_results.append(r)
+                elif d == yesterday_d:
+                    yesterday_results.append(r)
+                else:
+                    older_results.append(r)
+
+            # Distribute: fill ~75% from today first, then yesterday, then older
+            results: list[dict] = []
+            today_take = min(len(today_results),
+                             max_results - len(results))
+            if today_take > 0:
+                # Take up to 3/4 from today, ensuring at least 1 if available
+                target_today = max(1, max_results * 3 // 4)
+                today_take = min(today_take, min(target_today, today_take))
+            results.extend(today_results[:today_take])
+            yesterday_take = min(len(yesterday_results), max_results - len(results))
+            results.extend(yesterday_results[:yesterday_take])
+            if len(results) < max_results:
+                results.extend(older_results[:max_results - len(results)])
+        else:
+            results = raw_results[:max_results]
 
         # Clean output: just title + URL per result. Telegram auto-generates
         # link previews so the user sees the page card without long snippets.

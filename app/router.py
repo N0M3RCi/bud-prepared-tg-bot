@@ -2402,6 +2402,7 @@ async def _process_text_response(message: Message, user_text: str) -> str:
     full_response = ""
     telegram_msg: Message | None = None
     typing_task: asyncio.Task | None = None
+    _response_sent = False  # tracks whether the response was sent to the user
 
     async def _keep_typing() -> None:
         try:
@@ -2447,6 +2448,7 @@ async def _process_text_response(message: Message, user_text: str) -> str:
                 full_response = await _stream_progressive(
                     message, streamed_text,
                 )
+                _response_sent = True
             elif streamed_text:
                 full_response = streamed_text
 
@@ -2496,9 +2498,15 @@ async def _process_text_response(message: Message, user_text: str) -> str:
             typing_task.cancel()
         full_response = full_response or "I've completed multiple operations. Feel free to ask for more details."
         await _send_long_message(message, full_response)
+        _response_sent = True
 
     if not full_response:
         full_response = "I processed your request."
+
+    # Send the response if it hasn't been delivered yet
+    # (iteration 0 sends via _stream_progressive; subsequent iterations after
+    #  tool calls save to DB but don't send — the user would see nothing)
+    if not _response_sent:
         await _send_long_message(message, full_response)
 
     return full_response
