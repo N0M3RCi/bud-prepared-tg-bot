@@ -16,6 +16,7 @@ import json
 import logging
 
 from aiogram import Bot, Router, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
@@ -1098,9 +1099,9 @@ async def _build_page_for_page(page: str, user_id: int) -> tuple[str, InlineKeyb
 async def _return_to_page(message: Message, user_id: int) -> None:
     """Return to the user's current menu page by editing the pinned menu message.
 
-    Uses _menu_tracker to find the single menu message — never sends a new one.
-    The `message` parameter is only used for `message.bot` (Telegram API client).
-    Falls back to sending a new menu if the pinned message was deleted.
+    Uses _menu_tracker to find the single menu message — never sends a new one
+    unless the pinned message was actually deleted. Handles Telegram's
+    "message is not modified" error as a no-op success.
     """
     page = _current_page.get(user_id, PAGE_MAIN)
     text, markup = await _build_page_for_page(page, user_id)
@@ -1115,10 +1116,17 @@ async def _return_to_page(message: Message, user_id: int) -> None:
                 reply_markup=markup,
             )
             return
+        except TelegramBadRequest as e:
+            # "not modified" means the menu content is identical — this happens
+            # when dismiss returns to the same page. It's NOT an error and must
+            # NOT trigger the fallback (which would create a DUPLICATE menu).
+            if "message is not modified" in str(e).lower():
+                return
+            # Other Telegram errors (deleted, too old) fall through to fallback
         except Exception:
-            pass  # Menu may have been deleted — fall through to send new one
+            pass  # Non-Telegram errors fall through to fallback
 
-    # Fallback: send a fresh menu message
+    # Fallback: send a fresh menu message (only when trackable message is gone)
     try:
         sent = await message.answer(text, parse_mode="Markdown", reply_markup=markup)
         _menu_tracker[user_id] = {
