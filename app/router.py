@@ -79,7 +79,7 @@ _bot_username: str = ""
 
 def set_bot_username(name: str) -> None:
     global _bot_username
-    _bot_username = name
+    _bot_username = name.lower()
 
 
 def _log_request(user_id: int, event: str, **extra: Any) -> None:
