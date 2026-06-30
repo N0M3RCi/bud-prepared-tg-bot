@@ -2189,6 +2189,12 @@ async def handle_message(message: Message) -> None:
     if not _is_group_chat(message) and await _handle_passcode_verification(user_id, text, message):
         return
 
+    # Check if this text is input for a pending menu action — must check
+    # BEFORE the group mention gate so menu actions (Image Gen, Web Search,
+    # etc.) work in groups without requiring an @mention.
+    if text and await process_pending_action(message, user_id, text):
+        return  # Message was consumed by a menu action
+
     # Group chat support — only respond when mentioned, replied to, or command
     if not await _should_respond_in_group(message):
         return
@@ -2225,14 +2231,6 @@ async def handle_message(message: Message) -> None:
     if await _check_rate_limit(user_id, message):
         _processing.discard(user_id)
         return
-
-    # Check if this text is input for a pending menu action
-    if not text:
-        _processing.discard(user_id)
-        return
-    if await process_pending_action(message, user_id, text):
-        _processing.discard(user_id)
-        return  # Message was consumed by a menu action
 
     try:
         start = time.monotonic()
