@@ -1890,6 +1890,9 @@ async def handle_file(message: Message) -> None:
     if not await _should_respond_in_group(message):
         return
 
+    # Check if there's a pending "read_file" menu action — consume it
+    _pending_menu_action.pop(user_id, None)
+
     # Check if blocked
     blocked = await Database.is_user_blocked(user_id)
     if blocked:
@@ -2340,59 +2343,12 @@ async def _execute_single_tool(
         ))
 
 
-# ─────────────────────────── Streaming ───────────────────────────
-
-STREAM_EDIT_INTERVAL = settings.stream_edit_interval
-
-
-async def _stream_response(message: Message, context: list[dict], model: str | None = None) -> str:
-    """Stream a response from the LLM, updating the Telegram message progressively."""
-    full_text = ""
-    telegram_msg: Message | None = None
-    last_edit_time = 0.0
-
-    async for tag, chunk in LLMClient.chat_completion_stream(messages=context, model=model):
-        if tag == "delta":
-            choice = chunk.get("choices", [{}])[0]
-            delta = choice.get("delta", {})
-            text_piece = delta.get("content") or ""
-            if not text_piece:
-                continue
-            full_text += text_piece
-
-            now = time.monotonic()
-            if now - last_edit_time >= STREAM_EDIT_INTERVAL:
-                try:
-                    if telegram_msg is None:
-                        telegram_msg = await _reply_or_answer(message, full_text)
-                    else:
-                        await telegram_msg.edit_text(full_text)
-                    last_edit_time = now
-                except Exception:
-                    pass
-
-        elif tag == "error":
-            full_text += f"\n\nError: {chunk}"
-            break
-
-    if telegram_msg and full_text:
-        try:
-            if telegram_msg.text != full_text:
-                await telegram_msg.edit_text(full_text)
-        except Exception:
-            await _send_long_message(message, full_text)
-    elif full_text:
-        await _send_long_message(message, full_text)
-
-    return full_text
-
-
 # ─────────────────────────── Vision ───────────────────────────
 
 async def _process_vision_response(
     message: Message, image_path: str, prompt: str, user_id: int,
 ) -> None:
-    """Process an image using vision API. Reuses _stream_response for consistent streaming."""
+    """Process an image using vision API. Sends the full response at once."""
     try:
         loop = asyncio.get_running_loop()
 
@@ -2405,6 +2361,19 @@ async def _process_vision_response(
 
         data_uri = await loop.run_in_executor(None, _read_image)
         system_prompt = await SessionManager.get_system_prompt(user_id)
+
+        # Typing indicator while processing
+        async def _keep_typing() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(4)
+                    await message.bot.send_chat_action(message.chat.id, "typing")
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+        typing_task = asyncio.ensure_future(_keep_typing())
 
         client = LLMClient.get_client()
         raw_stream = await client.chat.completions.create(
@@ -2424,9 +2393,6 @@ async def _process_vision_response(
         )
 
         full_text = ""
-        telegram_msg: Message | None = None
-        last_edit_time = 0.0
-
         async for chunk in raw_stream:
             delta = chunk.choices[0].delta if chunk.choices else None
             text_piece = delta.content if delta else ""
@@ -2434,25 +2400,13 @@ async def _process_vision_response(
                 continue
             full_text += text_piece
 
-            now = time.monotonic()
-            if now - last_edit_time >= STREAM_EDIT_INTERVAL:
-                try:
-                    if telegram_msg is None:
-                        telegram_msg = await _reply_or_answer(message, full_text)
-                    else:
-                        await telegram_msg.edit_text(full_text)
-                    last_edit_time = now
-                except Exception:
-                    pass
+        typing_task.cancel()
 
-        if telegram_msg and full_text:
-            try:
-                if telegram_msg.text != full_text:
-                    await telegram_msg.edit_text(full_text)
-            except Exception:
-                await _send_long_message(message, full_text)
-        elif full_text:
-            await _send_long_message(message, full_text)
+        # Send the full response at once — no progressive editing
+        if full_text:
+            await _reply_or_answer(message, full_text)
+        else:
+            await _reply_or_answer(message, "I processed the image but have no specific response.")
 
         conv_id = (await SessionManager.get_conversation_context(user_id))[1]
         await SessionManager.save_assistant_response(conv_id, user_id, full_text)

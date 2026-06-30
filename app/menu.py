@@ -1374,6 +1374,10 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
         except Exception:
             pass
 
+    elif action == "dismiss_stats":
+        await _dismiss_stats(callback, user_id)
+        return  # _dismiss_stats calls callback.answer() and _return_to_page internally
+
     elif action == "open_website":
         website_url = await Database.get_config("website_url")
         if website_url:
@@ -1442,6 +1446,18 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
     await callback.answer()
 
 
+async def _dismiss_stats(callback: CallbackQuery, user_id: int) -> None:
+    """Delete the stats message and return to the pinned menu."""
+    # Delete the stats message
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer()
+    # Refresh the original pinned menu
+    await _return_to_page(callback.message, user_id)
+
+
 async def _show_stats(callback: CallbackQuery, user_id: int) -> None:
     """Show user stats in a new message (not editing the menu) so the menu stays intact."""
     await callback.answer()
@@ -1467,9 +1483,9 @@ async def _show_stats(callback: CallbackQuery, user_id: int) -> None:
 
     text = "\n".join(lines)
 
-    # Send as a new message with a "Back" button so the menu stays intact
+    # Send as a new message with a "Back" button that dismisses the stats message
     builder = InlineKeyboardBuilder()
-    builder.row(_button("⬅️  Back to Menu", f"page:{_current_page.get(user_id, PAGE_MAIN)}"), width=1)
+    builder.row(_button("⬅️  Back to Menu", "action:dismiss_stats"), width=1)
     try:
         await callback.message.answer(text, parse_mode="Markdown", reply_markup=builder.as_markup())
     except Exception:
@@ -1764,7 +1780,7 @@ async def menu_callback_handler(callback: CallbackQuery) -> None:
             if cb_value in ("stats", "new_chat", "retry", "help", "export_conv",
                             "admin_stats", "admin_users", "admin_clear_feedback", "cancel_input",
                             "open_website", "open_group", "admin_remove_website", "admin_remove_grouplink",
-                            "admin_export_csv"):
+                            "admin_export_csv", "dismiss_stats"):
                 if cb_value == "cancel_input":
                     _pending_action.pop(user_id, None)
                     await _navigate_page(callback, user_id, _current_page.get(user_id, PAGE_MAIN))
