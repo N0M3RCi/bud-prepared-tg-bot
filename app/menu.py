@@ -1131,7 +1131,10 @@ async def _return_to_page(message: Message, user_id: int) -> None:
 
     # Fallback: send a fresh menu message (only when trackable message is gone)
     try:
-        sent = await message.answer(text, parse_mode="Markdown", reply_markup=markup)
+        sent = await message.bot.send_message(
+            message.chat.id, text,
+            parse_mode="Markdown", reply_markup=markup,
+        )
         _menu_tracker[user_id] = {
             "chat_id": sent.chat.id,
             "message_id": sent.message_id,
@@ -1455,27 +1458,29 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
 
 
 async def _send_info_message(target: Message | CallbackQuery, text: str, parse_mode: str = "Markdown") -> None:
-    """Send an info message as a new message with a 'Back to Menu' dismiss button.
+    """Send an info message as a NEW standalone message (not a reply) with a
+    'Back to Menu' dismiss button.
 
-    Never touches the pinned menu — always sends a brand-new message that
-    the user can dismiss cleanly. Falls back to plain text if Markdown
-    fails (e.g. URLs with underscores).
+    Uses bot.send_message() directly so the message is NOT a threaded reply
+    to the menu — it appears as a clean standalone message at the bottom.
+    Falls back to plain text if Markdown fails.
     """
     builder = InlineKeyboardBuilder()
     builder.row(_button("⬅️  Back to Menu", "action:dismiss_info"), width=1)
     markup = builder.as_markup()
+
+    if isinstance(target, CallbackQuery):
+        bot = target.bot
+        chat_id = target.message.chat.id
+    else:
+        bot = target.bot
+        chat_id = target.chat.id
+
     try:
-        if isinstance(target, CallbackQuery):
-            await target.message.answer(text, parse_mode=parse_mode, reply_markup=markup)
-        else:
-            await target.answer(text, parse_mode=parse_mode, reply_markup=markup)
+        await bot.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=markup)
     except TelegramBadRequest:
-        # Fall back to plain text if Markdown fails (URLs with _ etc.)
         try:
-            if isinstance(target, CallbackQuery):
-                await target.message.answer(text, parse_mode=None, reply_markup=markup)
-            else:
-                await target.answer(text, parse_mode=None, reply_markup=markup)
+            await bot.send_message(chat_id, text, parse_mode=None, reply_markup=markup)
         except Exception:
             pass
     except Exception:
@@ -1518,11 +1523,14 @@ async def _show_stats(callback: CallbackQuery, user_id: int) -> None:
 
     text = "\n".join(lines)
 
-    # Send as a new message with a "Back" button that dismisses the stats message
+    # Send as a NEW standalone message (not a reply) with a "Back" button
     builder = InlineKeyboardBuilder()
     builder.row(_button("⬅️  Back to Menu", "action:dismiss_info"), width=1)
     try:
-        await callback.message.answer(text, parse_mode="Markdown", reply_markup=builder.as_markup())
+        await callback.bot.send_message(
+            callback.message.chat.id, text,
+            parse_mode="Markdown", reply_markup=builder.as_markup(),
+        )
     except Exception:
         pass
 
