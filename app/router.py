@@ -2067,7 +2067,8 @@ async def handle_file(message: Message) -> None:
 
     # File type validation at handler level
     if message.document:
-        file_name = message.document.file_name or "unknown_file"
+        raw_name = message.document.file_name or "unknown_file"
+        file_name = raw_name.replace("/", "_").replace("\\", "_")
         if _is_blocked_filename(file_name):
             _processing.discard(user_id)
             await _reply_or_answer(message,
@@ -2097,7 +2098,8 @@ async def handle_file(message: Message) -> None:
 
         if message.document:
             file_id = message.document.file_id
-            file_name = message.document.file_name or "unknown_file"
+            raw_name = message.document.file_name or "unknown_file"
+            file_name = raw_name.replace("/", "_").replace("\\", "_")
         elif message.photo:
             file_id = message.photo[-1].file_id
             file_name = "photo.jpg"
@@ -2296,6 +2298,7 @@ async def handle_voice(message: Message) -> None:
     _processing.add(user_id)
     _log_request(user_id, "voice")
 
+    local_path: str | None = None
     try:
         # Download the voice file
         voice = message.voice
@@ -2341,9 +2344,10 @@ async def handle_voice(message: Message) -> None:
         await _reply_or_answer(message, "Sorry, an error occurred while processing your voice message.")
     finally:
         _processing.discard(user_id)
-        # Clean up temp file
+        # Clean up temp file (may not exist if download failed early)
         try:
-            os.remove(local_path)
+            if local_path:
+                os.remove(local_path)
         except Exception:
             pass
 

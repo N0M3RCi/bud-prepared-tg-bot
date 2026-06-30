@@ -30,7 +30,7 @@ class LLMClient:
             api_key = settings.near_ai_api_key
             if not api_key:
                 logger.warning("NEAR_AI_API_KEY not set — using placeholder. Set your key in .env")
-                api_key = "sk-placeholder"
+                api_key = ""
             cls._instance = AsyncOpenAI(
                 base_url=settings.near_ai_base_url,
                 api_key=api_key,
@@ -49,7 +49,7 @@ class LLMClient:
             api_key = settings.near_ai_image_api_key or settings.near_ai_api_key
             if not api_key:
                 logger.warning("NEAR_AI_API_KEY not set — using placeholder. Set your key in .env")
-                api_key = "sk-placeholder"
+                api_key = ""
             cls._image_instance = AsyncOpenAI(
                 base_url=settings.near_ai_image_base_url or settings.near_ai_base_url,
                 api_key=api_key,
