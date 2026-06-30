@@ -43,6 +43,18 @@ logger = logging.getLogger(__name__)
 _bot_start_time: float = 0.0
 
 
+# Track all background tasks for clean shutdown
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _start_background_task(coro) -> asyncio.Task:
+    """Create a tracked background task. Removes itself from the set on completion."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
 # ─────────────────────────── Background Tasks ───────────────────────────
 
 async def _db_keepalive(interval: int = 30) -> None:
@@ -176,8 +188,8 @@ async def on_startup(bot: Bot) -> None:
         logger.warning("Set DATABASE_URL in your Railway environment to enable persistence.")
 
     # Start background tasks common to both modes
-    asyncio.ensure_future(_db_keepalive())
-    asyncio.ensure_future(_cleanup_stale_files())
+    _start_background_task(_db_keepalive())
+    _start_background_task(_cleanup_stale_files())
 
     if settings.use_webhook:
         logger.info(
@@ -193,7 +205,7 @@ async def on_startup(bot: Bot) -> None:
         )
 
     # Report bot startup to dashboard
-    asyncio.ensure_future(report_system_event(
+    _start_background_task(report_system_event(
         "bot_start",
         details=f"Bot started. Model: {settings.near_ai_model} | Webhook: {settings.use_webhook}",
     ))
@@ -202,9 +214,19 @@ async def on_startup(bot: Bot) -> None:
 async def on_shutdown(bot: Bot) -> None:
     """Clean up resources on shutdown."""
     logger.info("Shutting down...")
-
-    # Report bot shutdown to dashboard
     uptime = int(time.time() - _bot_start_time) if _bot_start_time else 0
+
+    # Cancel all tracked background tasks
+    if _background_tasks:
+        logger.info("Cancelling %d background tasks...", len(_background_tasks))
+        for task in list(_background_tasks):
+            task.cancel()
+        done, pending = await asyncio.wait(_background_tasks, timeout=5)
+        if pending:
+            logger.warning("%d background tasks did not finish in time", len(pending))
+        _background_tasks.clear()
+
+    # Report bot shutdown to dashboard (fire-and-forget, no await)
     asyncio.ensure_future(report_system_event(
         "bot_stop",
         details=f"Bot shutting down. Uptime: {uptime}s",
@@ -284,7 +306,7 @@ async def _health_check_server() -> None:
 
 async def _run_polling(bot: Bot, dp: Dispatcher) -> None:
     """Run the bot in polling mode with a health server."""
-    asyncio.ensure_future(_health_check_server())
+    _start_background_task(_health_check_server())
 
     try:
         await dp.start_polling(bot)

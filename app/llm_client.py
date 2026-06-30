@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, Optional
 
 from openai import AsyncOpenAI, APIError, RateLimitError, APITimeoutError
 
@@ -60,55 +60,6 @@ class LLMClient:
     @classmethod
     def set_default_tools(cls, tools: list[dict[str, Any]]) -> None:
         cls._default_tools = tools
-
-    @classmethod
-    async def chat_completion_stream(
-        cls,
-        messages: list[dict[str, Any]],
-        tools: Optional[list[dict[str, Any]]] = None,
-        temperature: float = 0.3,
-        max_tokens: Optional[int] = None,
-        model: Optional[str] = None,
-    ) -> AsyncGenerator[str, None]:
-        """Stream a chat completion, yielding raw text chunks (not JSON-wrapped)."""
-        client = cls.get_client()
-        kwargs: dict[str, Any] = {
-            "model": model or settings.near_ai_model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens or settings.max_response_tokens,
-            "stream": True,
-        }
-        if tools or cls._default_tools:
-            kwargs["tools"] = tools or cls._default_tools
-            kwargs["tool_choice"] = "auto"
-
-        last_exc = None
-        for attempt in range(MAX_RETRIES):
-            try:
-                stream = await client.chat.completions.create(**kwargs)
-                async for chunk in stream:
-                    delta = chunk.model_dump(mode="json")
-                    choices = delta.get("choices", [])
-                    if not choices:
-                        continue
-                    yield ("delta", delta)
-                return
-            except (APIError, RateLimitError, APITimeoutError) as e:
-                last_exc = e
-                if attempt < MAX_RETRIES - 1:
-                    delay = BASE_RETRY_DELAY * (2 ** attempt)
-                    logger.warning("LLM API error (attempt %d/%d): %s. Retrying in %.1fs...",
-                                   attempt + 1, MAX_RETRIES, e, delay)
-                    await asyncio.sleep(delay)
-                else:
-                    logger.error("LLM API failed after %d retries: %s", MAX_RETRIES, e)
-            except Exception as e:
-                logger.error("LLM streaming failed: %s", e)
-                yield ("error", str(e))
-                return
-
-        yield ("error", f"LLM request failed after {MAX_RETRIES} attempts: {last_exc}")
 
     @classmethod
     async def stream_and_collect(
