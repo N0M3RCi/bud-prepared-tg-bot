@@ -380,7 +380,26 @@ async def command_reporting_middleware(handler, event: Message, data: dict):
 
 
 # Whitelisted commands allowed in groups for non-admin users
-_ALLOWED_GROUP_COMMANDS = {"ping", "model", "start", "help", "h", "commands", "menu", "m"}
+_ALLOWED_GROUP_COMMANDS = {
+    "ping", "model", "start", "help", "h", "commands", "menu", "m",
+    "new", "clear", "reset", "n",
+    "prompt", "system", "sys",
+    "settings", "config",
+    "stats", "usage",
+    "retry",
+    "chatid", "id",
+    "conversations", "conv", "chats",
+    "export",
+    "switch",
+    "rename",
+    "delete_conv",
+    "search",
+    "imagine", "draw", "image",
+    "calc", "calculate", "math",
+    "feedback", "suggest",
+    "find", "searchconv",
+    "delete_my_data",
+}
 # Admin-only commands
 _ADMIN_COMMANDS = {"admin_stats", "admin_broadcast", "admin_users", "admin_block", "admin_unblock", "admin_feedback", "admin_clear_feedback", "admin_viewconv", "admin_llm_config", "admin_diag", "admin_analytics", "admin_skills"}
 
@@ -1285,13 +1304,6 @@ async def cmd_find(message: Message) -> None:
 async def cmd_delete_my_data(message: Message) -> None:
     """Permanently delete all user data."""
     user_id = message.from_user.id
-
-    # In groups, don't allow this
-    if _is_group_chat(message):
-        await _reply_or_answer(message,
-            "Please run this command in a private chat with me."
-        )
-        return
 
     text = message.text or ""
     parts = text.split(maxsplit=1)
