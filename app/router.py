@@ -424,9 +424,10 @@ async def restrict_group_commands_middleware(handler, event: Message, data: dict
             if cmd in _ALLOWED_GROUP_COMMANDS:
                 return await handler(event, data)
 
-            # Admin-only commands — silently ignore for non-admins
+            # Admin-only commands — tell non-admins
             if cmd in _ADMIN_COMMANDS:
                 if event.from_user and event.from_user.id not in settings.admin_ids:
+                    await event.reply("This command can only be used by an admin.")
                     return
                 return await handler(event, data)
 
