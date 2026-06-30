@@ -1052,7 +1052,10 @@ async def _show_main_menu(message_or_callback: Message | CallbackQuery, user_id:
             pass  # Silently ignore — menu message may have been deleted
         await message_or_callback.answer()
     else:
-        sent = await message_or_callback.answer(text, parse_mode="Markdown", reply_markup=markup)
+        sent = await message_or_callback.bot.send_message(
+            message_or_callback.chat.id, text,
+            parse_mode="Markdown", reply_markup=markup,
+        )
         _menu_tracker[user_id] = {
             "chat_id": sent.chat.id,
             "message_id": sent.message_id,
@@ -1282,7 +1285,9 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
             return
         await callback.answer()
         # Send status message without touching the pinned menu
-        status_msg = await callback.message.answer("🔄 Retrying last message...")
+        status_msg = await callback.bot.send_message(
+            callback.message.chat.id, "🔄 Retrying last message...",
+        )
         _processing_bot_msg = callback.message
         await _router._process_text_response(_processing_bot_msg, last_text)
         # Clean up status message
@@ -1294,8 +1299,9 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
         for img_path in pending:
             try:
                 with open(img_path, "rb") as f:
-                    await callback.message.answer_photo(
-                        BufferedInputFile(f.read(), filename="image.png"),
+                    photo = BufferedInputFile(f.read(), filename="image.png")
+                    await callback.bot.send_photo(
+                        callback.message.chat.id, photo,
                         caption="Generated image",
                     )
                 import os
@@ -1333,7 +1339,8 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
             return
         try:
             export_bytes = export_text.encode("utf-8")
-            await callback.message.answer_document(
+            await callback.bot.send_document(
+                callback.message.chat.id,
                 BufferedInputFile(export_bytes, filename=f"conversation_{conv['id']}.txt"),
                 caption=f"Exported: {conv.get('title', 'Untitled')}",
             )
@@ -1445,7 +1452,8 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
                 csv_lines.append(f"{day['date']},{day['reqs']},{day['t_in']},{day['t_out']}")
             csv_text = "\n".join(csv_lines)
             csv_bytes = csv_text.encode("utf-8")
-            await callback.message.answer_document(
+            await callback.bot.send_document(
+                callback.message.chat.id,
                 BufferedInputFile(csv_bytes, filename=f"analytics_7d.csv"),
                 caption="📊 Analytics export (7 days)",
             )
@@ -1549,7 +1557,9 @@ async def process_pending_action(message: Message, user_id: int, text: str) -> b
     if not action:
         return False
 
-    processing_msg = await message.answer("Processing your request...")
+    processing_msg = await message.bot.send_message(
+        message.chat.id, "Processing your request...",
+    )
 
     try:
         if action == "web_search":
@@ -1565,8 +1575,9 @@ async def process_pending_action(message: Message, user_id: int, text: str) -> b
             for img_path in pending:
                 try:
                     with open(img_path, "rb") as f:
-                        await message.answer_photo(
-                            BufferedInputFile(f.read(), filename="image.png"),
+                        img_file = BufferedInputFile(f.read(), filename="image.png")
+                        await message.bot.send_photo(
+                            message.chat.id, img_file,
                             caption="Generated image",
                         )
                     import os
@@ -1780,7 +1791,7 @@ async def process_pending_action(message: Message, user_id: int, text: str) -> b
         try:
             await processing_msg.edit_text("❌ Action failed. Please try again.")
         except Exception:
-            await message.answer("❌ Action failed. Please try again.")
+            await message.bot.send_message(message.chat.id, "❌ Action failed. Please try again.")
 
     # Attach a "Back to Menu" dismiss button to the result message,
     # so the user always has an explicit way to return to the menu.
