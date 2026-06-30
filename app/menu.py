@@ -1231,7 +1231,20 @@ async def _navigate_page(callback: CallbackQuery, user_id: int, page: str) -> No
 
 
 async def _set_pending_action(callback: CallbackQuery, user_id: int, action: str) -> None:
-    """Set a pending action and show the input prompt in the pinned menu."""
+    """Set a pending action and show the input prompt in the pinned menu.
+
+    Checks admin status for admin-only actions before setting the prompt,
+    so non-admins get immediate feedback instead of waiting for input.
+    """
+    _ADMIN_ONLY_ACTIONS = {
+        "admin_broadcast", "admin_block", "admin_unblock",
+        "set_website", "set_grouplink", "set_passcode", "remove_passcode",
+        "admin_viewconv",
+    }
+    if action in _ADMIN_ONLY_ACTIONS and user_id not in settings.admin_ids:
+        await callback.answer("Access denied.", show_alert=True)
+        return
+
     _pending_action[user_id] = action
     text, markup = await build_input_prompt(user_id, action)
     try:
@@ -1438,15 +1451,28 @@ async def _send_info_message(target: Message | CallbackQuery, text: str, parse_m
     """Send an info message as a new message with a 'Back to Menu' dismiss button.
 
     Never touches the pinned menu — always sends a brand-new message that
-    the user can dismiss cleanly.
+    the user can dismiss cleanly. Falls back to plain text if Markdown
+    fails (e.g. URLs with underscores).
     """
     builder = InlineKeyboardBuilder()
     builder.row(_button("⬅️  Back to Menu", "action:dismiss_info"), width=1)
     markup = builder.as_markup()
-    if isinstance(target, CallbackQuery):
-        await target.message.answer(text, parse_mode=parse_mode, reply_markup=markup)
-    else:
-        await target.answer(text, parse_mode=parse_mode, reply_markup=markup)
+    try:
+        if isinstance(target, CallbackQuery):
+            await target.message.answer(text, parse_mode=parse_mode, reply_markup=markup)
+        else:
+            await target.answer(text, parse_mode=parse_mode, reply_markup=markup)
+    except TelegramBadRequest:
+        # Fall back to plain text if Markdown fails (URLs with _ etc.)
+        try:
+            if isinstance(target, CallbackQuery):
+                await target.message.answer(text, parse_mode=None, reply_markup=markup)
+            else:
+                await target.answer(text, parse_mode=None, reply_markup=markup)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 async def _dismiss_info(callback: CallbackQuery, user_id: int) -> None:
@@ -1724,6 +1750,13 @@ async def process_pending_action(message: Message, user_id: int, text: str) -> b
             else:
                 await processing_msg.edit_text("❌ Cancelled. No feedback was deleted.")
 
+        elif action == "read_file":
+            await processing_msg.edit_text(
+                "📁 *Read File*\n\n"
+                "Please upload a file (PDF, image, text, code, CSV) instead of sending text.",
+                parse_mode="Markdown",
+            )
+
         else:
             await processing_msg.edit_text(f"Unknown action: {action}")
 
@@ -1831,9 +1864,9 @@ async def menu_callback_handler(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Menu callback error for user %d: %s", user_id, e)
-        # Try to recover by showing main menu
+        # Never send a new menu here — that creates duplicates. The pinned
+        # menu still exists; the user can type /menu if it's in a bad state.
         try:
-            await _show_main_menu(callback.message, user_id)
+            await callback.answer("An error occurred. Type /menu to recover.", show_alert=True)
         except Exception:
             pass
-        await callback.answer("An error occurred. Returning to main menu.", show_alert=True)
