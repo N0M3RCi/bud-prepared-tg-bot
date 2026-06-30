@@ -820,7 +820,9 @@ async def build_admin_analytics_page(user_id: int) -> tuple[str, InlineKeyboardM
         text += "*Top Users:*\n"
         for i, u in enumerate(top[:5], 1):
             uname = u.get("username") or f"user_{u['user_id']}"
-            text += f"  {i}. `{u['user_id']}` (@{uname}) — {u['reqs']} req\n"
+            # Escape underscores in usernames to prevent Markdown italic parsing errors
+            safe_uname = uname.replace("_", "\\_")
+            text += f"  {i}. `{u['user_id']}` (@{safe_uname}) — {u['reqs']} req\n"
 
     builder = InlineKeyboardBuilder()
     builder.row(
