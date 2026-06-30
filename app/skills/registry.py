@@ -8,6 +8,7 @@ from app.skills.web_search import TOOL_DEFINITION as SEARCH_TOOL, web_search
 from app.skills.image_gen import TOOL_DEFINITION as IMAGE_TOOL, generate_image
 from app.skills.file_reader import TOOL_DEFINITION as FILE_TOOL, read_file
 from app.skills.calculator import TOOL_DEFINITION as CALC_TOOL, calculate
+from app.skills.time_tool import TOOL_DEFINITION as TIME_TOOL, get_current_time
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,7 @@ _TOOL_HANDLERS: dict[str, Any] = {
     "generate_image": generate_image,
     "read_file": read_file,
     "calculate": calculate,
+    "get_current_time": get_current_time,
 }
 
 # All tool definitions to send to the LLM
@@ -25,6 +27,7 @@ ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     IMAGE_TOOL,
     FILE_TOOL,
     CALC_TOOL,
+    TIME_TOOL,
 ]
 
 
