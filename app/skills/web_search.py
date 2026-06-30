@@ -100,7 +100,7 @@ async def web_search(query: str, max_results: int = 5) -> str:
             snippet = r.get("content", r.get("snippet", ""))
             publish_date = r.get("published_date", "")
             date_str = f" ({publish_date})" if publish_date else ""
-            formatted.append(f"{i}. **{title}**{date_str}\n   {snippet}\n   {url}")
+            formatted.append(f"{i}. {title}{date_str}\n   {snippet}\n   {url}")
 
         return "\n\n".join(formatted)
     except MissingAPIKeyError:
