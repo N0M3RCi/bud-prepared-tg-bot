@@ -953,9 +953,19 @@ async def cmd_search(message: Message) -> None:
     _log_request(user_id, "quick_search", query=query[:50])
     _processing.add(user_id)
     try:
-        await _reply_or_answer(message,f"Searching for: {query}")
+        # Send a single status message, then edit it with results to avoid
+        # sending two separate replies (which users perceive as "double reply").
+        status_msg = await message.bot.send_message(
+            message.chat.id, f"🔍 Searching for: {query}",
+        )
         result = await execute_tool("web_search", {"query": query})
-        await _reply_or_answer(message,f"*Search Results*\n\n{result}", parse_mode="Markdown")
+        # Truncate long results — Telegram has a ~4096 char message limit
+        header = "🔍 *Search Results*\n\n"
+        max_body = 4000 - len(header)
+        body = _escape_md(result)
+        if len(body) > max_body:
+            body = body[:max_body] + "\n\n_… (truncated)_"
+        await status_msg.edit_text(f"{header}{body}", parse_mode="Markdown")
         await Database.record_usage(user_id, searches=1)
     except Exception as e:
         logger.error("[user=%d] Quick search error: %s", user_id, e)
