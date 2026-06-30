@@ -43,8 +43,22 @@ def _get_client() -> Optional[TavilyClient]:
     return _client
 
 
+_NEWS_KEYWORDS = {"news", "latest", "update", "today", "current", "breaking",
+                    "flood", "weather", "election", "sports", "stock", "market",
+                    "covid", "pandemic", "earthquake", "hurricane", "storm",
+                    "crash", "accident", "attack", "war", "conflict"}
+
+_DEFAULT_DAYS = 30
+_NEWS_DAYS = 7
+
+
 async def web_search(query: str, max_results: int = 5) -> str:
-    """Execute a web search via Tavily — runs the sync client in a thread executor."""
+    """Execute a web search via Tavily with recency-aware parameters.
+
+    Detects news/current-event queries and automatically sets a narrower
+    time window and news topic to return fresh results rather than old
+    but keyword-relevant results.
+    """
     client = _get_client()
     if client is None:
         logger.warning("Tavily API key not configured — web search unavailable")
@@ -53,12 +67,25 @@ async def web_search(query: str, max_results: int = 5) -> str:
             "Please ask the user to set up the Tavily API key."
         )
 
+    # Heuristic: detect news/current-event queries for recency filtering
+    query_lower = query.lower()
+    is_news = any(kw in query_lower for kw in _NEWS_KEYWORDS)
+
     try:
-        # Run the synchronous Tavily call in a thread to avoid blocking the event loop
         loop = asyncio.get_running_loop()
 
         def _search() -> dict:
-            return client.search(query=query, max_results=min(max_results, 10))
+            kwargs: dict = {
+                "query": query,
+                "max_results": min(max_results, 10),
+                "search_depth": "advanced",
+            }
+            if is_news:
+                kwargs["topic"] = "news"
+                kwargs["days"] = _NEWS_DAYS
+            else:
+                kwargs["days"] = _DEFAULT_DAYS
+            return client.search(**kwargs)
 
         response = await loop.run_in_executor(None, _search)
         results = response.get("results", [])
@@ -71,7 +98,9 @@ async def web_search(query: str, max_results: int = 5) -> str:
             title = r.get("title", "No title")
             url = r.get("url", "")
             snippet = r.get("content", r.get("snippet", ""))
-            formatted.append(f"{i}. **{title}**\n   {snippet}\n   {url}")
+            publish_date = r.get("published_date", "")
+            date_str = f" ({publish_date})" if publish_date else ""
+            formatted.append(f"{i}. **{title}**{date_str}\n   {snippet}\n   {url}")
 
         return "\n\n".join(formatted)
     except MissingAPIKeyError:
