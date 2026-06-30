@@ -1496,7 +1496,23 @@ async def _send_info_message(target: Message | CallbackQuery, text: str, parse_m
 
 
 async def _dismiss_info(callback: CallbackQuery, user_id: int) -> None:
-    """Delete the info/dismissable message and return to the pinned menu."""
+    """Delete the info/dismissable message and return to the menu.
+
+    Deletes the old pinned menu message first so _return_to_page sends
+    a fresh menu at the bottom of the chat (right under the last bot
+    result) instead of editing the old stale menu back at its original
+    position higher up in the conversation.
+    """
+    tracker = _menu_tracker.pop(user_id, None)
+    if tracker:
+        try:
+            await callback.bot.delete_message(
+                chat_id=tracker["chat_id"],
+                message_id=tracker["message_id"],
+            )
+        except Exception:
+            pass
+
     try:
         await callback.message.delete()
     except Exception:
