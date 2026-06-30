@@ -44,15 +44,19 @@ def _get_client() -> Optional[TavilyClient]:
 
 
 _DAYS = 14
+_LATEST_KEYWORDS = {"latest", "recent", "breaking", "just in", "up to date", "newest",
+                     "today", "yesterday", "this week", "this morning", "this evening"}
 
 
 async def web_search(query: str, max_results: int = 5) -> str:
     """Execute a web search via Tavily with recency-aware parameters.
 
-    Uses general search with a 14-day window to return fresh, relevant
-    results without Tavily's news topic categorization (which adds
-    irrelevant category labels to results).
+    Detects "latest" / "today" / "breaking" keywords and automatically
+    appends today's date and narrows to a 2-day window for freshness.
+    Returns just title + URL — clean results with automatic link previews.
     """
+    import datetime
+
     client = _get_client()
     if client is None:
         logger.warning("Tavily API key not configured — web search unavailable")
@@ -60,6 +64,14 @@ async def web_search(query: str, max_results: int = 5) -> str:
             "Web search is not available because no TAVILY_API_KEY is configured. "
             "Please ask the user to set up the Tavily API key."
         )
+
+    # Detect "latest" queries — append today's date and tighten window
+    query_lower = query.lower()
+    is_latest = any(kw in query_lower for kw in _LATEST_KEYWORDS)
+    if is_latest:
+        today = datetime.date.today().strftime("%B %d, %Y")
+        if today.split()[0].lower() not in query_lower:
+            query = f"{query} {today}"
 
     try:
         loop = asyncio.get_running_loop()
@@ -69,7 +81,7 @@ async def web_search(query: str, max_results: int = 5) -> str:
                 query=query,
                 max_results=min(max_results, 10),
                 search_depth="advanced",
-                days=_DAYS,
+                days=2 if is_latest else _DAYS,
             )
 
         response = await loop.run_in_executor(None, _search)
@@ -78,14 +90,15 @@ async def web_search(query: str, max_results: int = 5) -> str:
         if not results:
             return f"No results found for '{query}'."
 
+        # Clean output: just title + URL per result. Telegram auto-generates
+        # link previews so the user sees the page card without long snippets.
         formatted = []
         for i, r in enumerate(results[:max_results], 1):
             title = r.get("title", "No title")
             url = r.get("url", "")
-            snippet = r.get("content", r.get("snippet", ""))
             publish_date = r.get("published_date", "")
             date_str = f" ({publish_date})" if publish_date else ""
-            formatted.append(f"{i}. {title}{date_str}\n   {snippet}\n   {url}")
+            formatted.append(f"{i}. {title}{date_str}\n   {url}")
 
         return "\n\n".join(formatted)
     except MissingAPIKeyError:
