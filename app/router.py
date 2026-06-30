@@ -108,6 +108,14 @@ async def _should_respond_in_group(message: Message) -> bool:
     if not _is_group_chat(message):
         return True  # Private chats always respond
 
+    # Check if it's a reply to the bot (continuing a thread) — must check
+    # before empty-text guard so voice messages and other non-text types
+    # that are replies to the bot also get through.
+    if message.reply_to_message and message.reply_to_message.from_user:
+        bot_me = await message.bot.me()
+        if message.reply_to_message.from_user.id == bot_me.id:
+            return True
+
     text = (message.text or message.caption or "").strip()
     if not text:
         return False
@@ -115,12 +123,6 @@ async def _should_respond_in_group(message: Message) -> bool:
     # Check for @mention
     if _bot_username and f"@{_bot_username}" in text.lower():
         return True
-
-    # Check if it's a reply to the bot (continuing a thread)
-    if message.reply_to_message and message.reply_to_message.from_user:
-        bot_me = await message.bot.me()
-        if message.reply_to_message.from_user.id == bot_me.id:
-            return True
 
     return False
 
