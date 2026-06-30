@@ -1225,15 +1225,12 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
     """Execute an action that doesn't need user input and return to menu."""
     if action == "stats":
         await _show_stats(callback, user_id)
+        return  # _show_stats calls callback.answer() internally — prevent double-call
     elif action == "new_chat":
         await SessionManager.clear_conversation(user_id)
         bust_cache(user_id)
-        try:
-            await callback.message.edit_text("🆕 Started a new conversation. Context cleared.")
-        except Exception:
-            pass  # Never fallback to answer — edits pinned menu only
-        await asyncio.sleep(1)
-        await _return_to_page(callback.message, user_id)
+        await callback.answer()
+        await _send_info_message(callback, "🆕 Started a new conversation. Context cleared.")
     elif action == "retry":
         import app.router as _router
         last_text = _router._last_user_message.get(user_id)
@@ -1278,12 +1275,8 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
             "/stats — View your usage stats\n"
             "/export — Export current conversation"
         )
-        try:
-            await callback.message.edit_text(help_text, parse_mode="Markdown")
-        except Exception:
-            pass  # Never fallback to answer — edits pinned menu only
-        await asyncio.sleep(1)
-        await _return_to_page(callback.message, user_id)
+        await callback.answer()
+        await _send_info_message(callback, help_text)
     elif action == "export_conv":
         conv = await Database.get_active_conversation(user_id)
         if not conv:
@@ -1307,6 +1300,7 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
         if user_id not in settings.admin_ids:
             await callback.answer("Access denied.", show_alert=True)
             return
+        await callback.answer()
         try:
             total_users = await Database.get_total_user_count()
         except Exception:
@@ -1331,36 +1325,19 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
             f"Daily cap per user: `{settings.rate_limit_daily_cap}`\n"
             f"Rate limit window: `{settings.rate_limit_window_seconds}s`"
         )
-        try:
-            await callback.message.edit_text(text, parse_mode="Markdown")
-        except Exception:
-            pass  # Never fallback to answer
-        await asyncio.sleep(2)
-        text2, markup2 = await build_admin_page(user_id)
-        try:
-            await callback.message.edit_text(text2, parse_mode="Markdown", reply_markup=markup2)
-        except Exception:
-            pass
+        await _send_info_message(callback, text)
     elif action == "admin_users":
         if user_id not in settings.admin_ids:
             await callback.answer("Access denied.", show_alert=True)
             return
+        await callback.answer()
         import app.router as _router
         active = list(_router._processing)
         if active:
             text = "*Currently Processing:*\n" + "\n".join(f"• `{uid}`" for uid in active[:30])
         else:
             text = "No users currently processing."
-        try:
-            await callback.message.edit_text(text, parse_mode="Markdown")
-        except Exception:
-            pass  # Never fallback to answer
-        await asyncio.sleep(2)
-        text2, markup2 = await build_admin_page(user_id)
-        try:
-            await callback.message.edit_text(text2, parse_mode="Markdown", reply_markup=markup2)
-        except Exception:
-            pass
+        await _send_info_message(callback, text)
     elif action == "admin_clear_feedback":
         if user_id not in settings.admin_ids:
             await callback.answer("Access denied.", show_alert=True)
@@ -1374,30 +1351,22 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
         except Exception:
             pass
 
-    elif action == "dismiss_stats":
-        await _dismiss_stats(callback, user_id)
-        return  # _dismiss_stats calls callback.answer() and _return_to_page internally
+    elif action == "dismiss_info":
+        await _dismiss_info(callback, user_id)
+        return  # calls callback.answer() and _return_to_page internally
 
     elif action == "open_website":
         website_url = await Database.get_config("website_url")
         if website_url:
-            try:
-                await callback.message.edit_text(f"🌐 Visit our website: {website_url}")
-            except Exception:
-                pass
-            await asyncio.sleep(2)
-            await _return_to_page(callback.message, user_id)
+            await callback.answer()
+            await _send_info_message(callback, f"🌐 Visit our website: {website_url}")
         else:
             await callback.answer("No website link configured.", show_alert=True)
     elif action == "open_group":
         group_link = await Database.get_config("group_link")
         if group_link:
-            try:
-                await callback.message.edit_text(f"👥 Join our group: {group_link}")
-            except Exception:
-                pass
-            await asyncio.sleep(2)
-            await _return_to_page(callback.message, user_id)
+            await callback.answer()
+            await _send_info_message(callback, f"👥 Join our group: {group_link}")
         else:
             await callback.answer("No group link configured.", show_alert=True)
     elif action == "admin_remove_website":
@@ -1446,15 +1415,28 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
     await callback.answer()
 
 
-async def _dismiss_stats(callback: CallbackQuery, user_id: int) -> None:
-    """Delete the stats message and return to the pinned menu."""
-    # Delete the stats message
+async def _send_info_message(target: Message | CallbackQuery, text: str, parse_mode: str = "Markdown") -> None:
+    """Send an info message as a new message with a 'Back to Menu' dismiss button.
+
+    Never touches the pinned menu — always sends a brand-new message that
+    the user can dismiss cleanly.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(_button("⬅️  Back to Menu", "action:dismiss_info"), width=1)
+    markup = builder.as_markup()
+    if isinstance(target, CallbackQuery):
+        await target.message.answer(text, parse_mode=parse_mode, reply_markup=markup)
+    else:
+        await target.answer(text, parse_mode=parse_mode, reply_markup=markup)
+
+
+async def _dismiss_info(callback: CallbackQuery, user_id: int) -> None:
+    """Delete the info/dismissable message and return to the pinned menu."""
     try:
         await callback.message.delete()
     except Exception:
         pass
     await callback.answer()
-    # Refresh the original pinned menu
     await _return_to_page(callback.message, user_id)
 
 
@@ -1485,7 +1467,7 @@ async def _show_stats(callback: CallbackQuery, user_id: int) -> None:
 
     # Send as a new message with a "Back" button that dismisses the stats message
     builder = InlineKeyboardBuilder()
-    builder.row(_button("⬅️  Back to Menu", "action:dismiss_stats"), width=1)
+    builder.row(_button("⬅️  Back to Menu", "action:dismiss_info"), width=1)
     try:
         await callback.message.answer(text, parse_mode="Markdown", reply_markup=builder.as_markup())
     except Exception:
@@ -1780,7 +1762,7 @@ async def menu_callback_handler(callback: CallbackQuery) -> None:
             if cb_value in ("stats", "new_chat", "retry", "help", "export_conv",
                             "admin_stats", "admin_users", "admin_clear_feedback", "cancel_input",
                             "open_website", "open_group", "admin_remove_website", "admin_remove_grouplink",
-                            "admin_export_csv", "dismiss_stats"):
+                            "admin_export_csv", "dismiss_info"):
                 if cb_value == "cancel_input":
                     _pending_action.pop(user_id, None)
                     await _navigate_page(callback, user_id, _current_page.get(user_id, PAGE_MAIN))
