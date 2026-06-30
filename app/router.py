@@ -125,6 +125,12 @@ async def _should_respond_in_group(message: Message) -> bool:
     return False
 
 
+def _escape_md(text: str) -> str:
+    """Escape Telegram Markdown special characters in user-provided text.
+    Prevents entity parsing errors (_ for italic, * for bold, ` for code)."""
+    return text.replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
+
+
 def _is_safe_prompt(prompt: str) -> tuple[bool, str]:
     """Validate a system prompt for injection attempts. Returns (safe, reason)."""
     if len(prompt) > settings.max_system_prompt_length:
@@ -1169,9 +1175,11 @@ async def cmd_feedback(message: Message) -> None:
         try:
             user_info = message.from_user
             name = user_info.full_name or user_info.username or str(user_id)
+            safe_name = _escape_md(name)
+            safe_feedback = _escape_md(feedback_text)
             await message.bot.send_message(
                 admin_id,
-                f"*New Feedback from {name} (ID: {user_id})*\n\n{feedback_text}",
+                f"*New Feedback from {safe_name} (ID: {user_id})*\n\n{safe_feedback}",
                 parse_mode="Markdown",
             )
             admin_notified = True
@@ -1202,8 +1210,10 @@ async def cmd_admin_feedback(message: Message) -> None:
         name = fb.get("first_name") or fb.get("username") or str(fb["user_id"])
         ts = fb["created_at"].strftime("%Y-%m-%d %H:%M") if fb.get("created_at") else "?"
         msg_text = fb["message"][:200]
-        lines.append(f"• *{name}* (ID: {fb['user_id']}) [{ts}]:")
-        lines.append(f"  _{msg_text}_")
+        safe_name = _escape_md(name)
+        safe_msg = _escape_md(msg_text)
+        lines.append(f"• *{safe_name}* (ID: {fb['user_id']}) [{ts}]:")
+        lines.append(f"  _{safe_msg}_")
         lines.append("")
 
     for chunk in _chunk_lines(lines, 15):
@@ -1266,7 +1276,7 @@ async def callback_switch_conversation(callback: CallbackQuery) -> None:
     if ok:
         conv = await Database.get_conversation_by_id(conv_id)
         title = conv.get("title", "Conversation") if conv else "Conversation"
-        await callback.message.edit_text(f"Switched to: *{title}*", parse_mode="Markdown")
+        await callback.message.edit_text(f"Switched to: *{_escape_md(title)}*", parse_mode="Markdown")
     else:
         await callback.message.edit_text("Failed to switch conversation.")
     await callback.answer()
@@ -1292,7 +1302,7 @@ async def cmd_switch(message: Message) -> None:
     if ok:
         conv = await Database.get_conversation_by_id(conv_id)
         title = conv.get("title", "Conversation") if conv else "Conversation"
-        await _reply_or_answer(message,f"Switched to: *{title}*", parse_mode="Markdown")
+        await _reply_or_answer(message,f"Switched to: *{_escape_md(title)}*", parse_mode="Markdown")
     else:
         await _reply_or_answer(message,"Conversation not found or not yours.")
 
@@ -1324,7 +1334,7 @@ async def cmd_rename(message: Message) -> None:
         return
 
     await Database.update_conversation_title(conv_id, new_title)
-    await _reply_or_answer(message,f"Conversation renamed to: *{new_title}*", parse_mode="Markdown")
+    await _reply_or_answer(message,f"Conversation renamed to: *{_escape_md(new_title)}*", parse_mode="Markdown")
 
 
 @router.message(CMD_DELETE_CONV)
@@ -1568,7 +1578,7 @@ async def cmd_admin_viewconv(message: Message) -> None:
 
     lines = [
         f"*User Profile: `{target_id}`*",
-        f"👤 Name: {first_name} (@{username})",
+        f"👤 Name: {_escape_md(first_name)} (@{_escape_md(username)})",
         f"📊 Status: {blocked} | Model: `{model}`",
         f"💬 Conversations: {profile.get('conversation_count', 0)}",
         f"📝 Messages: {profile.get('total_messages', 0)}",
@@ -1576,7 +1586,7 @@ async def cmd_admin_viewconv(message: Message) -> None:
         f"📥 Tokens in: {profile.get('total_in', 0):,}",
         f"📤 Tokens out: {profile.get('total_out', 0):,}",
         f"🖼️ Images: {profile.get('total_img', 0)}",
-        f"⚙️ System prompt: `{sys_prompt}`",
+        f"⚙️ System prompt: `{_escape_md(sys_prompt)}`",
     ]
 
     # Get conversation list
@@ -1590,9 +1600,9 @@ async def cmd_admin_viewconv(message: Message) -> None:
             last = conv.get("last_msg", "")
             if last and len(last) > 60:
                 last = last[:60] + "..."
-            lines.append(f"  `{conv['id']}` — *{title}* ({msgs} msgs)")
+            lines.append(f"  `{conv['id']}` — *{_escape_md(title)}* ({msgs} msgs)")
             if last:
-                lines.append(f"       ↳ {last}")
+                lines.append(f"       ↳ {_escape_md(last)}")
     else:
         lines.append("")
         lines.append("No conversations found.")
@@ -1819,7 +1829,8 @@ async def cmd_admin_analytics(message: Message) -> None:
         lines.extend(["", "*Top Users:*"])
         for i, u in enumerate(top, 1):
             uname = u.get("username") or f"user_{u['user_id']}"
-            lines.append(f"  {i}. `{u['user_id']}` (@{uname}) — {u['reqs']} req")
+            safe_uname = _escape_md(uname)
+            lines.append(f"  {i}. `{u['user_id']}` (@{safe_uname}) — {u['reqs']} req")
 
     lines.extend([
         "",

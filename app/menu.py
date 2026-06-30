@@ -448,7 +448,11 @@ async def build_admin_feedback_page(user_id: int) -> tuple[str, InlineKeyboardMa
         name = fb.get("first_name") or fb.get("username") or str(fb["user_id"])
         ts = fb["created_at"].strftime("%m-%d %H:%M") if fb.get("created_at") else "?"
         msg_text = fb["message"][:150]
-        lines.append(f"• *{name}* [{ts}]: _{msg_text}_")
+        # Escape Markdown special characters in user-provided text to prevent
+        # Telegram entity parsing errors (_ for italic, * for bold, ` for code)
+        safe_name = name.replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
+        safe_msg = msg_text.replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
+        lines.append(f"• *{safe_name}* [{ts}]: _{safe_msg}_")
 
     text = "\n".join(lines)
 
