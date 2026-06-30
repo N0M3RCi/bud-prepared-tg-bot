@@ -433,8 +433,8 @@ async def _run_webhook(bot: Bot, dp: Dispatcher) -> None:
     # Manually emit startup so lifecycle runs before the webhook server
     # starts accepting requests (aiogram's SimpleRequestHandler does not
     # auto-emit dp.startup in webhook mode).
-    await dp.startup.emit(bot=bot)
-    logger.info("Dispatcher startup emitted.")
+    await dp.startup.trigger(bot=bot)
+    logger.info("Dispatcher startup triggered.")
 
     # Webhook POST route — uses aiogram's official handler which
     # validates secret token, resolves Bot instance, and feeds updates
