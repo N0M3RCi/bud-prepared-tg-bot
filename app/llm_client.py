@@ -99,22 +99,20 @@ class LLMClient:
                 tool_calls_acc: dict[int, dict[str, Any]] = {}
 
                 async for chunk in stream:
-                    delta = chunk.model_dump(mode="json")
-                    choices = delta.get("choices", [])
-                    if not choices:
+                    # Direct Pydantic field access — NO model_dump()!
+                    # model_dump(mode="json") on every chunk was a major bottleneck
+                    if not chunk.choices:
                         continue
-                    choice = choices[0]
-                    msg_delta = choice.get("delta", {})
+                    delta = chunk.choices[0].delta
 
                     # Accumulate content
-                    text_piece = msg_delta.get("content") or ""
+                    text_piece = delta.content or ""
                     full_text += text_piece
 
                     # Accumulate tool calls from stream deltas
-                    raw_tcs = msg_delta.get("tool_calls")
-                    if raw_tcs:
-                        for tc in raw_tcs:
-                            idx = tc.get("index", 0)
+                    if delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            idx = tc.index
                             if idx not in tool_calls_acc:
                                 tool_calls_acc[idx] = {
                                     "id": "",
@@ -122,16 +120,15 @@ class LLMClient:
                                     "function": {"name": "", "arguments": ""},
                                 }
                             entry = tool_calls_acc[idx]
-                            if tc.get("id"):
-                                entry["id"] = tc["id"]
-                            if tc.get("type"):
-                                entry["type"] = tc["type"]
-                            if tc.get("function"):
-                                fn = tc["function"]
-                                if fn.get("name"):
-                                    entry["function"]["name"] += fn["name"]
-                                if fn.get("arguments"):
-                                    entry["function"]["arguments"] += fn["arguments"]
+                            if tc.id:
+                                entry["id"] = tc.id
+                            if tc.type:
+                                entry["type"] = tc.type
+                            if tc.function:
+                                if tc.function.name:
+                                    entry["function"]["name"] += tc.function.name
+                                if tc.function.arguments:
+                                    entry["function"]["arguments"] += tc.function.arguments
 
                 # Convert accumulated tool calls to standard format
                 parsed_tool_calls: list[tuple[str, str, dict[str, Any]]] = []

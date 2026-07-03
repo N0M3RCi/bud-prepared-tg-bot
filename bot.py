@@ -29,7 +29,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 
 from app.config import settings
 from app.database import Database
-from app.router import router, set_bot_start_time, set_bot_username
+from app.router import router, set_bot_start_time, set_bot_username, set_service_health, get_service_health
 from app.dashboard_reporter import report_system_event
 
 logging.basicConfig(
@@ -53,6 +53,19 @@ def _start_background_task(coro) -> asyncio.Task:
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return task
+
+
+# ─────────────────────────── Admin Alerting ───────────────────────────
+
+async def _notify_admins(bot: Bot, message: str) -> None:
+    """Send a notification to all configured admin IDs via Telegram."""
+    if not settings.admin_ids:
+        return
+    for admin_id in settings.admin_ids:
+        try:
+            await bot.send_message(admin_id, f"⚠️ {message}")
+        except Exception as e:
+            logger.warning("Failed to notify admin %d: %s", admin_id, e)
 
 
 # ─────────────────────────── Background Tasks ───────────────────────────
@@ -88,23 +101,19 @@ def _clean_directory(now: float, directory: str, max_age: int) -> int:
 
 
 async def _webhook_self_test() -> None:
-    """Periodically verify the bot's webhook is healthy and responsive.
+    """Periodically verify the bot is healthy and responsive.
 
     Every 10 minutes:
-    - Checks webhook info (URL, pending count) if in webhook mode
-    - Logs warnings for anomalies
-    - Helps detect dead or misconfigured webhooks early.
+    - Checks bot self-info (liveness)
+    - Checks webhook configuration (URL, pending count, errors)
+    - Auto-re-registers webhook if misconfigured
+    - Sends Telegram alerts to admins on failures
     """
     await asyncio.sleep(300)  # Initial delay to let startup settle
     while True:
         await asyncio.sleep(600)  # Every 10 minutes
+        bot = None
         try:
-            from app.router import router
-            bot = None
-            # We need a Bot instance — get it from settings
-            from aiogram import Bot
-            from aiogram.client.default import DefaultBotProperties
-            from aiogram.enums import ParseMode
             bot = Bot(
                 token=settings.bot_token,
                 default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
@@ -113,26 +122,43 @@ async def _webhook_self_test() -> None:
                 # Check bot self-info (liveness)
                 me = await bot.get_me()
                 logger.info("[watchdog] Bot @%s self-check OK", me.username or "?")
+                set_service_health("telegram_api", True)
 
                 if settings.use_webhook:
                     # Check webhook configuration
                     info = await bot.get_webhook_info()
-                    if info.url != settings.webhook_url.rstrip("/") + settings.webhook_path:
+                    expected_url = settings.webhook_url.rstrip("/") + settings.webhook_path
+                    needs_re_register = False
+
+                    if info.url != expected_url:
                         logger.warning(
-                            "[watchdog] Webhook URL mismatch: expected '%s', got '%s'",
-                            settings.webhook_url.rstrip("/") + settings.webhook_path,
-                            info.url,
+                            "[watchdog] Webhook URL mismatch: expected '%s', got '%s' — re-registering",
+                            expected_url, info.url,
                         )
+                        needs_re_register = True
+
+                    if info.last_error_date and info.last_error_message:
+                        logger.warning(
+                            "[watchdog] Webhook last error: %s (at %s) — re-registering",
+                            info.last_error_message, info.last_error_date,
+                        )
+                        needs_re_register = True
+
                     if info.pending_update_count and info.pending_update_count > 10:
                         logger.warning(
                             "[watchdog] %d pending updates on webhook — possible processing backlog",
                             info.pending_update_count,
                         )
-                    if info.last_error_date and info.last_error_message:
-                        logger.warning(
-                            "[watchdog] Webhook last error: %s (at %s)",
-                            info.last_error_message, info.last_error_date,
+
+                    if needs_re_register:
+                        await bot.set_webhook(
+                            url=expected_url,
+                            allowed_updates=["message", "callback_query", "my_chat_member"],
+                            drop_pending_updates=False,
                         )
+                        new_info = await bot.get_webhook_info()
+                        logger.info("[watchdog] Webhook re-registered: %s", new_info.url)
+                        await _notify_admins(bot, f"Webhook re-registered: {new_info.url}")
                     else:
                         logger.info("[watchdog] Webhook check OK: %s", info.url)
                 else:
@@ -141,6 +167,83 @@ async def _webhook_self_test() -> None:
                 await bot.session.close()
         except Exception as e:
             logger.error("[watchdog] Self-test failed: %s", e)
+            set_service_health("telegram_api", False)
+            if bot:
+                try:
+                    await _notify_admins(bot, f"Bot self-check failed: {e}")
+                except Exception:
+                    pass
+
+
+async def _external_services_check(interval: int = 600) -> None:
+    """Periodically check external service health (Tavily, NEAR AI).
+
+    Updates shared service health state and notifies admins when
+    a service goes down or comes back online.
+    """
+    await asyncio.sleep(120)  # Initial delay for startup
+    while True:
+        await asyncio.sleep(interval)  # Every 10 minutes
+        try:
+            bot = Bot(
+                token=settings.bot_token,
+                default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
+            )
+            try:
+                # ── Check Tavily web search ──
+                if settings.tavily_api_key:
+                    try:
+                        from tavily import TavilyClient
+                        tc = TavilyClient(api_key=settings.tavily_api_key)
+                        loop = asyncio.get_running_loop()
+                        result = await loop.run_in_executor(
+                            None, lambda: tc.search(query="health check", max_results=1),
+                        )
+                        was_healthy = result.get("results") is not None
+
+                        if was_healthy:
+                            health = get_service_health()
+                            if not health.get("tavily", True):
+                                logger.info("[services] Tavily web search recovered")
+                                await _notify_admins(bot, "Tavily web search is back online")
+                            set_service_health("tavily", True)
+                        else:
+                            raise Exception("Unexpected response structure")
+                    except Exception as e:
+                        health = get_service_health()
+                        if health.get("tavily", True):
+                            logger.warning("[services] Tavily check failed: %s", e)
+                            await _notify_admins(bot, f"Tavily web search is DOWN: {e}")
+                        set_service_health("tavily", False)
+
+                # ── Check NEAR AI / LLM API ──
+                if settings.near_ai_api_key:
+                    try:
+                        from openai import AsyncOpenAI
+                        nc = AsyncOpenAI(
+                            base_url=settings.near_ai_base_url,
+                            api_key=settings.near_ai_api_key,
+                        )
+                        # List models as a lightweight connectivity check
+                        models = await nc.models.list()
+                        if models:
+                            health = get_service_health()
+                            if not health.get("near_ai", True):
+                                logger.info("[services] NEAR AI recovered")
+                                await _notify_admins(bot, "NEAR AI is back online")
+                            set_service_health("near_ai", True)
+                        await nc.close()
+                    except Exception as e:
+                        health = get_service_health()
+                        if health.get("near_ai", True):
+                            logger.warning("[services] NEAR AI check failed: %s", e)
+                            await _notify_admins(bot, f"NEAR AI is DOWN: {e}")
+                        set_service_health("near_ai", False)
+
+            finally:
+                await bot.session.close()
+        except Exception as e:
+            logger.error("[services] External health check task error: %s", e)
 
 
 async def _cleanup_stale_files(interval: int = 300, max_age: int = 3600) -> None:
@@ -249,6 +352,7 @@ async def on_startup(bot: Bot) -> None:
     _start_background_task(_db_keepalive())
     _start_background_task(_cleanup_stale_files())
     _start_background_task(_webhook_self_test())
+    _start_background_task(_external_services_check())
 
     if settings.use_webhook:
         logger.info(

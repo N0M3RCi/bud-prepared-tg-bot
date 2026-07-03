@@ -68,6 +68,8 @@ _MESSAGE_TTL = 15  # seconds — how long to remember a processed message text
 MAX_TOOL_ITERATIONS = 10
 # Compression threshold
 COMPRESS_AFTER_MESSAGES = 40
+# Maximum user text length sent to LLM (characters) — prevents abuse / token waste
+MAX_USER_TEXT_LENGTH = 10000
 
 # Bot start time (single source of truth, set from bot.py)
 _bot_start_time: float = 0.0
@@ -76,6 +78,24 @@ _bot_start_time: float = 0.0
 def set_bot_start_time(t: float) -> None:
     global _bot_start_time
     _bot_start_time = t
+
+
+# Service health tracking for external dependencies
+_service_health: dict[str, bool] = {
+    "telegram_api": True,
+    "tavily": True,
+    "near_ai": True,
+}
+
+
+def set_service_health(service: str, healthy: bool) -> None:
+    """Update the tracked health state of an external service."""
+    _service_health[service] = healthy
+
+
+def get_service_health() -> dict[str, bool]:
+    """Return a copy of current service health states."""
+    return dict(_service_health)
 
 
 # ─── Helpers ───
@@ -1882,6 +1902,11 @@ async def cmd_admin_diag(message: Message) -> None:
         "",
         f"*⏱️ Uptime:* {uptime_h}h {uptime_m}m",
         f"*🟡 Degraded:* {'YES (DB fallback)' if Database.is_degraded() else 'No'}",
+        "",
+        "*🌐 External Services:*",
+        f"  • Telegram API: {'🟢 OK' if _service_health.get('telegram_api', True) else '🔴 DOWN'}",
+        f"  • Tavily Search: {'🟢 OK' if _service_health.get('tavily', True) else '🔴 DOWN'}",
+        f"  • NEAR AI: {'🟢 OK' if _service_health.get('near_ai', True) else '🔴 DOWN'}",
         f"*💾 DB Pool:* {db_stats.get('status', '?')} | "
         f"{db_stats.get('free', 0)}/{db_stats.get('pool_size', 0)} free "
         f"(min={db_stats.get('min_size', '?')}, max={db_stats.get('max_size', '?')})",
@@ -2178,6 +2203,14 @@ async def handle_message(message: Message) -> None:
 
     text = (message.text or "").strip()
 
+    # User text size limit — prevent token waste and abuse
+    if len(text) > MAX_USER_TEXT_LENGTH:
+        await _reply_or_answer(message,
+            f"Your message is {len(text):,} characters, which exceeds the "
+            f"maximum of {MAX_USER_TEXT_LENGTH:,}. Please shorten your message."
+        )
+        return
+
     # Check onboarding state — if user hasn't completed onboarding, prompt them
     if not _is_group_chat(message):
         done = await Database.is_onboarding_done(user_id)
@@ -2338,6 +2371,16 @@ async def handle_voice(message: Message) -> None:
 
         await status_msg.edit_text(f"🎤 \"{transcribed[:100]}{'...' if len(transcribed) > 100 else ''}\"")
 
+        # User text size limit — prevent token waste from very long transcriptions
+        if len(transcribed) > MAX_USER_TEXT_LENGTH:
+            _processing.discard(user_id)
+            await _reply_or_answer(message,
+                f"Your voice message transcribed to {len(transcribed):,} characters, "
+                f"which exceeds the maximum of {MAX_USER_TEXT_LENGTH:,}. "
+                "Please send a shorter message."
+            )
+            return
+
         # Process the transcribed text as a normal message
         _last_user_message[user_id] = transcribed
         _last_user_msg_id[user_id] = message.message_id
@@ -2459,8 +2502,10 @@ async def _process_text_response(message: Message, user_text: str) -> str:
                 typing_task = None
 
         # Fix #3: Deferred token counting — fire-and-forget
+        # Note: json.dumps is done inside the async task, not here,
+        # so it doesn't block the main processing path
         asyncio.ensure_future(_record_usage_async(
-            user_id, json.dumps(context), streamed_text,
+            user_id, context, streamed_text,
         ))
 
         if not tool_calls or any(tc[0] == "" and tc[1] == "error" for tc in tool_calls):
@@ -2594,12 +2639,15 @@ async def _select_fast_model(user_text: str, user_id: int) -> str:
     return settings.fast_model if is_simple else settings.near_ai_model
 
 
-async def _record_usage_async(user_id: int, context_json: str, response_text: str) -> None:
+async def _record_usage_async(user_id: int, context: list, response_text: str) -> None:
     """Fire-and-forget token counting and usage recording.
 
     Runs in a background task so the user doesn't wait for analytics.
+    json.dumps is done here (not at the call site) to avoid blocking
+    the main response path.
     """
     try:
+        context_json = json.dumps(context)
         tokens_in = await LLMClient.count_tokens(context_json)
         tokens_out = await LLMClient.count_tokens(response_text)
         await Database.record_usage(
@@ -2688,29 +2736,43 @@ async def _process_vision_response(
             typing_task = asyncio.ensure_future(_keep_typing())
 
             client = LLMClient.get_client()
-            raw_stream = await client.chat.completions.create(
-                model=settings.near_ai_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": data_uri}},
-                        ],
-                    },
-                ],
-                max_tokens=settings.max_response_tokens,
-                stream=True,
-            )
+            vision_messages = [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": data_uri}},
+                    ],
+                },
+            ]
+
+            from openai import APIError, RateLimitError, APITimeoutError
 
             full_text = ""
-            async for chunk in raw_stream:
-                delta = chunk.choices[0].delta if chunk.choices else None
-                text_piece = delta.content if delta else ""
-                if not text_piece:
-                    continue
-                full_text += text_piece
+            for attempt in range(3):
+                try:
+                    raw_stream = await client.chat.completions.create(
+                        model=settings.near_ai_model,
+                        messages=vision_messages,
+                        max_tokens=settings.max_response_tokens,
+                        stream=True,
+                    )
+                    async for chunk in raw_stream:
+                        delta = chunk.choices[0].delta if chunk.choices else None
+                        text_piece = delta.content if delta else ""
+                        if not text_piece:
+                            continue
+                        full_text += text_piece
+                    break
+                except (APIError, RateLimitError, APITimeoutError) as e:
+                    if attempt < 2:
+                        delay = 1.0 * (2 ** attempt)
+                        logger.warning("Vision API error (attempt %d/3): %s. Retrying in %.1fs...",
+                                       attempt + 1, e, delay)
+                        await asyncio.sleep(delay)
+                    else:
+                        raise
         finally:
             if typing_task:
                 typing_task.cancel()
