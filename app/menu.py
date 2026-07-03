@@ -31,6 +31,7 @@ from app.database import Database
 from app.session_manager import SessionManager, bust_cache
 from app.skills.registry import execute_tool
 from app.skills.image_gen import pop_pending_images
+from app.skills.file_writer import pop_pending_files
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,10 @@ _pending_action: dict[int, str] = {}  # "web_search", "generate_image", "calcula
 # Pinned menu message tracker — stores the single menu message per user so
 # all menu edits happen in-place, never creating duplicate messages.
 _menu_tracker: dict[int, dict] = {}  # user_id -> {"chat_id": int, "message_id": int}
+
+# Track users who already got a "Back to Menu" message after image generation,
+# so the generic handler doesn't add a duplicate button to the processing_msg.
+_image_menu_sent: set[int] = set()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1286,6 +1291,18 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
                 os.remove(img_path)
             except Exception as e:
                 logger.error("Menu retry image send failed: %s", e)
+        pending_files = pop_pending_files(user_id)
+        for file_path, display_name in pending_files:
+            try:
+                with open(file_path, "rb") as f:
+                    await callback.bot.send_document(
+                        callback.message.chat.id,
+                        BufferedInputFile(f.read(), filename=display_name),
+                        caption=f"Generated: {display_name}",
+                    )
+                os.remove(file_path)
+            except Exception as e:
+                logger.error("Menu retry file send failed: %s", e)
     elif action == "help":
         help_text = (
             "🤖 *Bud AI Help*\n\n"
@@ -1580,6 +1597,35 @@ async def process_pending_action(message: Message, user_id: int, text: str) -> b
                     os.remove(img_path)
                 except Exception as e:
                     logger.error("Menu image send failed: %s", e)
+            # Send the actual menu page directly below the image(s) instead of a
+            # "Back to Menu" button — this avoids the jarring scroll-to-top when
+            # the user taps back and the old pinned menu gets edited far above.
+            page = _current_page.get(user_id, PAGE_MAIN)
+            text, markup = await _build_page_for_page(page, user_id)
+            try:
+                menu_msg = await message.bot.send_message(
+                    message.chat.id, text,
+                    parse_mode="Markdown",
+                    reply_markup=markup,
+                )
+                # Delete the old pinned menu message to keep the chat clean
+                tracker = _menu_tracker.get(user_id)
+                if tracker:
+                    try:
+                        await message.bot.delete_message(
+                            chat_id=tracker["chat_id"],
+                            message_id=tracker["message_id"],
+                        )
+                    except Exception:
+                        pass
+                # Point tracker to the new menu message so future edits use it
+                _menu_tracker[user_id] = {
+                    "chat_id": message.chat.id,
+                    "message_id": menu_msg.message_id,
+                }
+            except Exception as e:
+                logger.error("Failed to send menu after image: %s", e)
+            _image_menu_sent.add(user_id)
 
         elif action == "calculate":
             result = await execute_tool("calculate", {"expression": text})
@@ -1793,12 +1839,15 @@ async def process_pending_action(message: Message, user_id: int, text: str) -> b
     # so the user always has an explicit way to return to the menu.
     # This is more reliable than auto-returning via _return_to_page
     # which can silently fail.
-    try:
-        builder = InlineKeyboardBuilder()
-        builder.row(_button("⬅️  Back to Menu", "action:dismiss_info"), width=1)
-        await processing_msg.edit_reply_markup(reply_markup=builder.as_markup())
-    except Exception:
-        pass
+    # Skip if already sent as a separate message after image(s).
+    if user_id not in _image_menu_sent:
+        try:
+            builder = InlineKeyboardBuilder()
+            builder.row(_button("⬅️  Back to Menu", "action:dismiss_info"), width=1)
+            await processing_msg.edit_reply_markup(reply_markup=builder.as_markup())
+        except Exception:
+            pass
+    _image_menu_sent.discard(user_id)
     return True
 
 

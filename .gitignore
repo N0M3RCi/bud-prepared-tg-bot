@@ -27,3 +27,13 @@ Thumbs.db
 
 # Test
 .pytest_cache/
+
+# Generated reports / audit files (no functional value)
+*.docx
+AUDIT_REPORT*.md
+benchmark.py
+test_write_file.py
+
+# Generated code snippets (stress tests, not part of app)
+/code_100/
+/code_snippets/

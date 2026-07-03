@@ -24,6 +24,7 @@ from app.skills.registry import (
     execute_tool,
 )
 from app.skills.image_gen import pop_pending_images, current_user_id as image_ctx_var
+from app.skills.file_writer import pop_pending_files, current_user_id as file_writer_ctx
 
 from app.menu import menu_router, process_pending_action, _pending_action as _pending_menu_action, _return_to_page
 from app.dashboard_reporter import (
@@ -70,6 +71,8 @@ MAX_TOOL_ITERATIONS = 10
 COMPRESS_AFTER_MESSAGES = 40
 # Maximum user text length sent to LLM (characters) — prevents abuse / token waste
 MAX_USER_TEXT_LENGTH = 10000
+# Tracks conversations that have already been auto-titled — prevents refiring
+_auto_title_done: set[int] = set()
 
 # Bot start time (single source of truth, set from bot.py)
 _bot_start_time: float = 0.0
@@ -281,39 +284,73 @@ async def handle_new_chat_members(message: Message) -> None:
             logger.warning("Failed to DM user %d for passcode: %s", new_user.id, e)
             _pending_passcode.pop(new_user.id, None)
 
+# In-memory rate limiting — sliding window per user
+# Maps user_id -> list of request timestamps (monotonic)
+_rate_limit_windows: dict[int, list[float]] = {}
+# In-memory daily cap — approximate counter, reset on bot restart
+_daily_request_count: dict[int, int] = {}
+# Track last daily reset date to avoid stale counters across restarts
+_last_daily_reset: float = 0.0
+_DAILY_RESET_INTERVAL = 86400  # 24 hours
+
 async def _check_rate_limit(user_id: int, message: Message) -> bool:
-    """Check rate limits. Returns True if the request should be blocked."""
+    """Check rate limits using in-memory sliding window. Returns True if blocked."""
     if _is_admin(user_id):
         return False  # No rate limit for admins
 
-    # Check daily cap via persistent stats
-    today_usage = await Database.get_user_usage_today(user_id)
-    if today_usage["requests"] >= settings.rate_limit_daily_cap:
+    now = time.monotonic()
+    window_sec = settings.rate_limit_window_seconds
+    max_req = settings.rate_limit_max_requests
+    daily_cap = settings.rate_limit_daily_cap
+
+    # Reset daily counters periodically
+    if now - _last_daily_reset > _DAILY_RESET_INTERVAL:
+        _daily_request_count.clear()
+        _last_daily_reset = now
+
+    # Daily cap check (in-memory, approximate)
+    count = _daily_request_count.get(user_id, 0) + 1
+    _daily_request_count[user_id] = count
+    if count > daily_cap:
         asyncio.ensure_future(report_error(
             user_id=user_id,
             error_type="daily_cap_reached",
-            details=f"Daily cap of {settings.rate_limit_daily_cap} requests reached for user {user_id}",
+            details=f"Daily cap of {daily_cap} requests reached for user {user_id}",
         ))
         await _reply_or_answer(message,
-            f"You've reached your daily limit of {settings.rate_limit_daily_cap} requests. "
+            f"You've reached your daily limit of {daily_cap} requests. "
             "Please try again tomorrow."
         )
         return True
 
-    # Check rate limit window
-    allowed = await Database.check_rate_limit(user_id)
-    if not allowed:
-        remaining = await Database.get_rate_limit_remaining(user_id)
+    # Sliding window rate limit (in-memory)
+    timestamps = _rate_limit_windows.get(user_id, [])
+    cutoff = now - window_sec
+    # Filter out expired timestamps
+    if timestamps:
+        timestamps = [t for t in timestamps if t > cutoff]
+    _rate_limit_windows[user_id] = timestamps
+
+    if len(timestamps) >= max_req:
+        remaining = int(window_sec - (now - timestamps[0]))
         asyncio.ensure_future(report_error(
             user_id=user_id,
             error_type="rate_limited",
-            details=f"Rate limit ({settings.rate_limit_max_requests} req/{settings.rate_limit_window_seconds}s) for user {user_id}",
+            details=f"Rate limit ({max_req} req/{window_sec}s) for user {user_id}",
         ))
         await _reply_or_answer(message,
             f"You're sending too many requests. "
             f"Please wait {remaining} seconds before sending another request."
         )
         return True
+
+    timestamps.append(now)
+    # Periodic cleanup of stale entries
+    if len(_rate_limit_windows) > 500:
+        stale = [uid for uid, ts_list in _rate_limit_windows.items()
+                 if not ts_list or (now - ts_list[-1]) > window_sec * 2]
+        for uid in stale:
+            del _rate_limit_windows[uid]
 
     return False
 
@@ -973,6 +1010,23 @@ async def cmd_retry(message: Message) -> None:
                 os.remove(img_path)
             except Exception as e:
                 logger.error("Failed to send generated image: %s", e)
+
+        # Send any pending files generated during retry
+        pending_files = pop_pending_files(user_id)
+        for file_path, display_name in pending_files:
+            try:
+                with open(file_path, "rb") as f:
+                    await _api_call_with_retry(
+                        message.bot.send_document(
+                            message.chat.id,
+                            BufferedInputFile(f.read(), filename=display_name),
+                            caption=f"Generated: {display_name}",
+                        )
+                    )
+                os.remove(file_path)
+            except Exception as e:
+                logger.error("Failed to send generated file: %s", e)
+
         elapsed = (time.monotonic() - start) * 1000
         _log_request(user_id, "retry_ok", ms=f"{elapsed:.0f}")
     except Exception as e:
@@ -1005,7 +1059,7 @@ async def cmd_search(message: Message) -> None:
         return
 
     query = parts[1].strip()
-    blocked = await Database.is_user_blocked(user_id)
+    blocked = await SessionManager.is_user_blocked_cached(user_id)
     if blocked:
         await _reply_or_answer(message,"Your account has been blocked. Contact an admin.")
         return
@@ -1064,7 +1118,7 @@ async def cmd_imagine(message: Message) -> None:
         return
 
     prompt = parts[1].strip()
-    blocked = await Database.is_user_blocked(user_id)
+    blocked = await SessionManager.is_user_blocked_cached(user_id)
     if blocked:
         await _reply_or_answer(message,"Your account has been blocked. Contact an admin.")
         return
@@ -1126,7 +1180,7 @@ async def cmd_calc(message: Message) -> None:
         return
 
     expression = parts[1].strip()
-    blocked = await Database.is_user_blocked(user_id)
+    blocked = await SessionManager.is_user_blocked_cached(user_id)
     if blocked:
         await _reply_or_answer(message,"Your account has been blocked. Contact an admin.")
         return
@@ -1295,7 +1349,7 @@ async def cmd_find(message: Message) -> None:
         return
 
     keyword = parts[1].strip()
-    blocked = await Database.is_user_blocked(user_id)
+    blocked = await SessionManager.is_user_blocked_cached(user_id)
     if blocked:
         await _reply_or_answer(message,"Your account has been blocked.")
         return
@@ -2084,7 +2138,7 @@ async def handle_file(message: Message) -> None:
     was_menu_action = bool(_pending_menu_action.pop(user_id, None))
 
     # Check if blocked
-    blocked = await Database.is_user_blocked(user_id)
+    blocked = await SessionManager.is_user_blocked_cached(user_id)
     if blocked:
         await _reply_or_answer(message,"Your account has been blocked. Contact an admin.")
         return
@@ -2241,7 +2295,7 @@ async def handle_message(message: Message) -> None:
         return
 
     # Check if blocked
-    blocked = await Database.is_user_blocked(user_id)
+    blocked = await SessionManager.is_user_blocked_cached(user_id)
     if blocked:
         await _reply_or_answer(message,"Your account has been blocked. Contact an admin.")
         return
@@ -2296,6 +2350,22 @@ async def handle_message(message: Message) -> None:
             except Exception as e:
                 logger.error("Failed to send generated image: %s", e)
 
+        # Send any pending generated files as documents
+        pending_files = pop_pending_files(user_id)
+        for file_path, display_name in pending_files:
+            try:
+                with open(file_path, "rb") as f:
+                    await _api_call_with_retry(
+                        message.bot.send_document(
+                            message.chat.id,
+                            BufferedInputFile(f.read(), filename=display_name),
+                            caption=f"Generated: {display_name}",
+                        )
+                    )
+                os.remove(file_path)
+            except Exception as e:
+                logger.error("Failed to send generated file: %s", e)
+
         elapsed = (time.monotonic() - start) * 1000
         _log_request(user_id, "response_ok", ms=f"{elapsed:.0f}")
     except Exception as e:
@@ -2323,7 +2393,7 @@ async def handle_voice(message: Message) -> None:
     if not await _should_respond_in_group(message):
         return
 
-    blocked = await Database.is_user_blocked(user_id)
+    blocked = await SessionManager.is_user_blocked_cached(user_id)
     if blocked:
         await _reply_or_answer(message, "Your account has been blocked. Contact an admin.")
         return
@@ -2386,6 +2456,22 @@ async def handle_voice(message: Message) -> None:
         _last_user_msg_id[user_id] = message.message_id
         await _process_text_response(message, transcribed)
 
+        # Send any pending generated files as documents
+        pending_files = pop_pending_files(user_id)
+        for file_path, display_name in pending_files:
+            try:
+                with open(file_path, "rb") as f:
+                    await _api_call_with_retry(
+                        message.bot.send_document(
+                            message.chat.id,
+                            BufferedInputFile(f.read(), filename=display_name),
+                            caption=f"Generated: {display_name}",
+                        )
+                    )
+                os.remove(file_path)
+            except Exception as e:
+                logger.error("Failed to send generated file from voice: %s", e)
+
     except Exception as e:
         logger.error("[user=%d] Voice handler error: %s", user_id, e)
         asyncio.ensure_future(report_error(
@@ -2414,7 +2500,7 @@ async def handle_unsupported(message: Message) -> None:
 
     user_id = message.from_user.id
 
-    blocked = await Database.is_user_blocked(user_id)
+    blocked = await SessionManager.is_user_blocked_cached(user_id)
     if blocked:
         return
 
@@ -2501,13 +2587,6 @@ async def _process_text_response(message: Message, user_text: str) -> str:
                 typing_task.cancel()
                 typing_task = None
 
-        # Fix #3: Deferred token counting — fire-and-forget
-        # Note: json.dumps is done inside the async task, not here,
-        # so it doesn't block the main processing path
-        asyncio.ensure_future(_record_usage_async(
-            user_id, context, streamed_text,
-        ))
-
         if not tool_calls or any(tc[0] == "" and tc[1] == "error" for tc in tool_calls):
             # No tool calls — this is a direct response. Stream it to the user.
             if iteration == 0 and streamed_text:
@@ -2522,21 +2601,28 @@ async def _process_text_response(message: Message, user_text: str) -> str:
             if full_response:
                 await SessionManager.save_assistant_response(conv_id, user_id, full_response)
 
-            # Auto-title: if the conversation still has the default title,
-            # fire-and-forget a lightweight LLM call to generate a short title.
-            all_msgs = await Database.get_conversation_messages(conv_id, limit=None)
-            if len(all_msgs) >= 3:
-                # Check current title
-                conv = await Database.get_conversation_by_id(conv_id)
-                if conv and conv.get("title", "").strip().lower() in ("new conversation", ""):
-                    asyncio.ensure_future(_auto_title_conv(conv_id, user_id, all_msgs))
-                # Trigger compression asynchronously
-                if len(all_msgs) > COMPRESS_AFTER_MESSAGES:
-                    asyncio.ensure_future(SessionManager.compress_context(user_id, conv_id))
+            # Auto-title: lightweight — uses count query instead of full message fetch.
+            # Only fires once per conversation (tracked in-memory).
+            if conv_id not in _auto_title_done:
+                msg_count = await Database.get_conversation_message_count(conv_id)
+                if msg_count >= 3:
+                    conv = await Database.get_conversation_by_id(conv_id)
+                    if conv and conv.get("title", "").strip().lower() in ("new conversation", ""):
+                        _auto_title_done.add(conv_id)
+                        asyncio.ensure_future(_auto_title_conv(conv_id, user_id))
+                    # Trigger compression asynchronously
+                    if msg_count > COMPRESS_AFTER_MESSAGES:
+                        asyncio.ensure_future(SessionManager.compress_context(user_id, conv_id))
+
+            # Record usage only on the final response — NOT on every tool iteration
+            asyncio.ensure_future(_record_usage_async(
+                user_id, context, full_response,
+            ))
             break
 
-        # Tool call iteration
+        # Tool call iteration — set context vars for both image_gen and file_writer
         image_ctx_var.set(user_id)
+        file_writer_ctx.set(user_id)
 
         raw_tool_calls_data = [
             {"id": tc[0], "type": "function", "function": {"name": tc[1], "arguments": json.dumps(tc[2])}}
@@ -2579,16 +2665,17 @@ async def _process_text_response(message: Message, user_text: str) -> str:
     return full_response
 
 
-async def _auto_title_conv(conv_id: int, user_id: int, messages: list[dict]) -> None:
+async def _auto_title_conv(conv_id: int, user_id: int) -> None:
     """Fire-and-forget: ask the LLM to generate a short title for a conversation.
 
     Uses the first few messages to generate a concise 3-5 word title.
     Runs in the background so the user doesn't wait for it.
     """
     try:
-        # Build a mini context from the messages
+        # Fetch only the first 5 messages — lightweight query
+        recent = await Database.get_conversation_messages(conv_id, limit=5)
         lines = []
-        for m in messages[:5]:
+        for m in recent:
             role = m["role"].upper()
             content = m["content"][:150]
             lines.append(f"[{role}]: {content}")
@@ -2784,6 +2871,8 @@ async def _process_vision_response(
             await _reply_or_answer(message, "I processed the image but have no specific response.")
 
         conv_id = (await SessionManager.get_conversation_context(user_id))[1]
+        # Save user's image analysis prompt to conversation history
+        await SessionManager.add_to_conversation(conv_id, user_id, "user", prompt)
         await SessionManager.save_assistant_response(conv_id, user_id, full_text)
 
         # Track usage — count system prompt + text prompt as input tokens

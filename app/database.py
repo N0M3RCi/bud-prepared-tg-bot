@@ -632,6 +632,22 @@ class Database:
             return msgs
 
     @classmethod
+    async def get_conversation_message_count(cls, conversation_id: int) -> int:
+        """Return the total number of messages in a conversation — lightweight COUNT query."""
+        try:
+            pool = await cls.get_pool()
+            async with pool.acquire() as conn:
+                count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM messages WHERE conversation_id = $1",
+                    conversation_id,
+                )
+                return count or 0
+        except Exception as e:
+            logger.debug("DB get_conversation_message_count failed for conv %d: %s", conversation_id, e)
+            msgs = cls._get_fallback_messages(conversation_id)
+            return len(msgs)
+
+    @classmethod
     async def delete_conversation(cls, conversation_id: int) -> None:
         pool = await cls.get_pool()
         async with pool.acquire() as conn:

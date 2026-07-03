@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Centralized in-memory cache: {user_id: {settings dict, _ts}}
 _user_cache: dict[int, dict[str, Any]] = {}
-_USER_CACHE_TTL = 60  # seconds
+_USER_CACHE_TTL = 300  # seconds — 5 minutes (was 60s, reduces DB queries 5x)
 _MAX_CACHE_SIZE = 2000
 
 
@@ -93,6 +93,12 @@ class SessionManager:
         if user:
             _set_cached_user(user_id, user)
         return user
+
+    @classmethod
+    async def is_user_blocked_cached(cls, user_id: int) -> bool:
+        """Check if user is blocked — uses cached user settings to avoid a DB query."""
+        user = await cls._get_user_settings_cached(user_id)
+        return user.get("is_blocked", False) if user else False
 
     @classmethod
     async def get_preferred_model_cached(cls, user_id: int) -> Optional[str]:

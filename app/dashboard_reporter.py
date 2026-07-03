@@ -11,6 +11,20 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Shared httpx client with connection pooling — avoids TCP/SSL handshake per event
+_dashboard_client: httpx.AsyncClient | None = None
+
+
+def _get_dashboard_client() -> httpx.AsyncClient:
+    """Get or create the shared dashboard httpx client (connection pooling)."""
+    global _dashboard_client
+    if _dashboard_client is None:
+        _dashboard_client = httpx.AsyncClient(
+            timeout=5.0,
+            limits=httpx.Limits(max_keepalive_connections=5, keepalive_expiry=30),
+        )
+    return _dashboard_client
+
 
 async def _send_event(payload: dict) -> None:
     """Low-level HTTP POST to the dashboard endpoint (fire-and-forget)."""
@@ -18,13 +32,13 @@ async def _send_event(payload: dict) -> None:
     if not url:
         return  # Dashboard not configured — silent no-op
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(
-                f"{url.rstrip('/')}/api/events/report",
-                json=payload,
-            )
-            if resp.status_code != 200:
-                logger.warning("Dashboard report failed: HTTP %d", resp.status_code)
+        client = _get_dashboard_client()
+        resp = await client.post(
+            f"{url.rstrip('/')}/api/events/report",
+            json=payload,
+        )
+        if resp.status_code != 200:
+            logger.warning("Dashboard report failed: HTTP %d", resp.status_code)
     except asyncio.TimeoutError:
         logger.debug("Dashboard report timed out (fire-and-forget)")
     except Exception as e:

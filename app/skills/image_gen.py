@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
@@ -69,11 +70,11 @@ async def generate_image(prompt: str) -> str:
     if img_bytes is None:
         return "Sorry, image generation failed."
 
-    # Save to temp file
+    # Save to temp file — offload sync I/O to thread pool
     os.makedirs("/tmp/bot_images", exist_ok=True)
     temp_path = os.path.join("/tmp/bot_images", f"gen_{os.urandom(4).hex()}.png")
-    with open(temp_path, "wb") as f:
-        f.write(img_bytes)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _write_image, temp_path, img_bytes)
 
     # Store for the router — keyed by current user via context var
     uid = current_user_id.get()
@@ -83,3 +84,9 @@ async def generate_image(prompt: str) -> str:
 
     # Keep return text short — the image is sent as a Telegram photo separately
     return "Image generated successfully."
+
+
+def _write_image(path: str, data: bytes) -> None:
+    """Synchronous file write — runs in thread pool executor."""
+    with open(path, "wb") as f:
+        f.write(data)

@@ -69,11 +69,6 @@ class Settings:
     # Smart model routing — fast model for simple queries
     fast_model: str = field(default_factory=lambda: os.getenv("FAST_MODEL", "openai/gpt-4o"))
 
-    # Streaming — progressive: fast initial updates, then settle
-    stream_edit_interval: float = float(os.getenv("STREAM_EDIT_INTERVAL", "1.5"))
-    stream_initial_interval: float = float(os.getenv("STREAM_INITIAL_INTERVAL", "0.35"))
-    stream_initial_updates: int = int(os.getenv("STREAM_INITIAL_UPDATES", "3"))
-
     # Token counting
     token_estimation_chars_per_token: int = int(os.getenv("TOKEN_ESTIMATION_CHARS_PER_TOKEN", "4"))
 

@@ -9,6 +9,7 @@ from app.skills.image_gen import TOOL_DEFINITION as IMAGE_TOOL, generate_image
 from app.skills.file_reader import TOOL_DEFINITION as FILE_TOOL, read_file
 from app.skills.calculator import TOOL_DEFINITION as CALC_TOOL, calculate
 from app.skills.time_tool import TOOL_DEFINITION as TIME_TOOL, get_current_time
+from app.skills.file_writer import TOOL_DEFINITION as WRITE_TOOL, write_file
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ _TOOL_HANDLERS: dict[str, Any] = {
     "read_file": read_file,
     "calculate": calculate,
     "get_current_time": get_current_time,
+    "write_file": write_file,
 }
 
 # All tool definitions to send to the LLM
@@ -28,6 +30,7 @@ ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     FILE_TOOL,
     CALC_TOOL,
     TIME_TOOL,
+    WRITE_TOOL,
 ]
 
 
