@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import time
 
 from aiogram import Router, F
 from aiogram.exceptions import TelegramBadRequest
@@ -273,7 +275,6 @@ async def build_admin_page(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     uptime_hours = 0
     try:
         import app.router as _router
-        import time
         uptime_hours = int(time.time() - _router._bot_start_time) // 3600
     except Exception:
         pass
@@ -579,8 +580,6 @@ async def build_admin_stats_page(user_id: int) -> tuple[str, InlineKeyboardMarku
 
     uptime_secs = 0
     try:
-        import app.router as _router
-        import time
         uptime_secs = int(time.time() - _router._bot_start_time)
     except Exception:
         pass
@@ -688,8 +687,6 @@ async def build_admin_diag_page(user_id: int) -> tuple[str, InlineKeyboardMarkup
 
     uptime_secs = 0
     try:
-        import app.router as _router
-        import time
         uptime_secs = int(time.time() - _router._bot_start_time)
     except Exception:
         pass
@@ -1286,7 +1283,6 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
                         callback.message.chat.id, photo,
                         caption="Generated image",
                     )
-                import os
                 os.remove(img_path)
             except Exception as e:
                 logger.error("Menu retry image send failed: %s", e)
@@ -1349,7 +1345,6 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
         uptime_hours = 0
         try:
             import app.router as _router
-            import time
             uptime_hours = int(time.time() - _router._bot_start_time) // 3600
         except Exception:
             pass
@@ -1582,7 +1577,6 @@ async def process_pending_action(message: Message, user_id: int, text: str) -> b
                             message.chat.id, img_file,
                             caption="Generated image",
                         )
-                    import os
                     os.remove(img_path)
                 except Exception as e:
                     logger.error("Menu image send failed: %s", e)
