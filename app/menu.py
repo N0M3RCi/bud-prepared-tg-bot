@@ -43,7 +43,6 @@ menu_router = Router()
 # ─── Constants ───
 MENU_PREFIX = "menu"
 PAGE_MAIN = "main"
-PAGE_TOOLS = "tools"
 PAGE_CONVERSATIONS = "convs"
 PAGE_SETTINGS = "settings"
 PAGE_ADMIN = "admin"
@@ -168,42 +167,11 @@ async def build_main_page(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
         )
 
     indicator = _page_indicator(
-        [PAGE_MAIN, PAGE_TOOLS, PAGE_CONVERSATIONS, PAGE_SETTINGS] + (["admin"] if is_admin else []),
+        [PAGE_MAIN, PAGE_CONVERSATIONS, PAGE_SETTINGS] + (["admin"] if is_admin else []),
         PAGE_MAIN,
     )
     text += f"\n\n{indicator}"
 
-    return text, builder.as_markup()
-
-
-async def build_tools_page() -> tuple[str, InlineKeyboardMarkup]:
-    """Tools page — detailed tools with descriptions."""
-    text = (
-        "🧰 *Tools*\n\n"
-        "Choose a tool to use:\n\n"
-        "🔍 *Web Search* — Search the web for current info\n"
-        "🎨 *Generate Image* — Create an image from text\n"
-        "🧮 *Calculate* — Solve math expressions\n"
-        "📁 *Read File* — Analyze uploaded files"
-    )
-
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        _button("🔍  Search", "action:web_search"),
-        _button("🎨  Image", "action:generate_image"),
-        width=2,
-    )
-    builder.row(
-        _button("🧮  Math", "action:calculate"),
-        _button("📁  File", "action:read_file"),
-        width=2,
-    )
-    builder.row(
-        _button("⬅️  Back", f"page:{PAGE_MAIN}"),
-        width=1,
-    )
-
-    text += f"\n\n{_page_indicator([PAGE_MAIN, PAGE_TOOLS], PAGE_TOOLS)}"
     return text, builder.as_markup()
 
 
@@ -1077,8 +1045,6 @@ async def _build_page_for_page(page: str, user_id: int) -> tuple[str, InlineKeyb
     """Build a menu page by name — same builder functions as _navigate_page."""
     if page == PAGE_MAIN:
         return await build_main_page(user_id)
-    elif page == PAGE_TOOLS:
-        return await build_tools_page()
     elif page == PAGE_CONVERSATIONS:
         return await build_conversations_page(user_id)
     elif page == PAGE_SETTINGS:
@@ -1164,8 +1130,6 @@ async def _navigate_page(callback: CallbackQuery, user_id: int, page: str) -> No
     if page == PAGE_MAIN:
         await _show_main_menu(callback, user_id)
         return
-    elif page == PAGE_TOOLS:
-        text, markup = await build_tools_page()
     elif page == PAGE_CONVERSATIONS:
         text, markup = await build_conversations_page(user_id)
     elif page == PAGE_SETTINGS:
@@ -1295,12 +1259,19 @@ async def _execute_direct_action(callback: CallbackQuery, user_id: int, action: 
             await callback.answer("No message to retry.", show_alert=True)
             return
         await callback.answer()
-        # Send status message without touching the pinned menu
+        # Reply to the original user message, not the menu bot message
+        original_msg_id = _router._last_user_msg_id.get(user_id)
         status_msg = await callback.bot.send_message(
             callback.message.chat.id, "🔄 Retrying last message...",
+            reply_to_message_id=original_msg_id,
         )
         _processing_bot_msg = callback.message
-        await _router._process_text_response(_processing_bot_msg, last_text)
+        # Set the contextvar so _reply_or_answer threads to the original message
+        token = _router._retry_reply_to.set(original_msg_id)
+        try:
+            await _router._process_text_response(_processing_bot_msg, last_text)
+        finally:
+            _router._retry_reply_to.reset(token)
         # Clean up status message
         try:
             await status_msg.delete()

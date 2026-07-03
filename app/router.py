@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ from typing import Any
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile, CallbackQuery, ChatPermissions
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import settings
@@ -49,6 +51,10 @@ router.include_router(onboarding_router)
 _processing: set[int] = set()
 # Last user message per user for /retry
 _last_user_message: dict[int, str] = {}
+# Original message ID per user for proper reply threading on retry
+_last_user_msg_id: dict[int, int] = {}
+# ContextVar to override reply_to_message_id (used by menu retry)
+_retry_reply_to: contextvars.ContextVar[int | None] = contextvars.ContextVar("_retry_reply_to", default=None)
 # Update ID deduplication — prevents duplicate processing from Telegram webhook retries
 _processed_updates: dict[tuple[int, int], float] = {}
 _UPDATE_TTL = 300  # seconds — keep update IDs for 5 minutes
@@ -2239,6 +2245,7 @@ async def handle_message(message: Message) -> None:
 
         # Store last user message for /retry
         _last_user_message[user_id] = text
+        _last_user_msg_id[user_id] = message.message_id
 
         await _process_text_response(message, text)
 
@@ -2333,6 +2340,7 @@ async def handle_voice(message: Message) -> None:
 
         # Process the transcribed text as a normal message
         _last_user_message[user_id] = transcribed
+        _last_user_msg_id[user_id] = message.message_id
         await _process_text_response(message, transcribed)
 
     except Exception as e:
@@ -2733,25 +2741,62 @@ async def _process_vision_response(
 
 # ─────────────────────────── Utility ───────────────────────────
 
+async def _api_call_with_retry(coro: Any, max_retries: int = 2) -> Any:
+    """Call a Telegram API coroutine, retrying on 429 (rate limit) with backoff."""
+    for attempt in range(max_retries):
+        try:
+            return await coro
+        except TelegramRetryAfter as e:
+            if attempt + 1 >= max_retries:
+                raise
+            retry_after = getattr(e, "retry_after", 1)
+            logger.warning("Telegram 429 rate limit — retrying after %ds (attempt %d/%d)", retry_after, attempt + 1, max_retries)
+            await asyncio.sleep(retry_after + 0.5)
+    return None
+
+
 async def _reply_or_answer(message: Message, text: str, **kwargs) -> Message:
     """Send a message — threaded reply always, so responses are visually linked
     to the user's message regardless of ordering.
 
     Falls back to plain text if Markdown parsing fails.
+
+    If _retry_reply_to contextvar is set (menu retry), replies to the
+    original user message instead of the menu bot message.
     """
+    override_reply_to = _retry_reply_to.get()
+    if override_reply_to is not None:
+        try:
+            return await _api_call_with_retry(
+                message.bot.send_message(
+                    message.chat.id, text,
+                    reply_to_message_id=override_reply_to,
+                    **kwargs,
+                )
+            )
+        except Exception as e:
+            if "can't parse entities" in str(e) and kwargs.get("parse_mode"):
+                kwargs.pop("parse_mode")
+                return await _api_call_with_retry(
+                    message.bot.send_message(
+                        message.chat.id, text,
+                        reply_to_message_id=override_reply_to,
+                        **kwargs,
+                    )
+                )
     try:
-        return await message.reply(text, **kwargs)
+        return await _api_call_with_retry(message.reply(text, **kwargs))
     except Exception as e:
         if "can't parse entities" in str(e) and kwargs.get("parse_mode"):
             kwargs.pop("parse_mode")
-            return await message.reply(text, **kwargs)
+            return await _api_call_with_retry(message.reply(text, **kwargs))
 
 
 async def _reply_or_answer_photo(message: Message, photo: BufferedInputFile, **kwargs) -> Message:
     """Send a photo — threaded reply in groups, normal answer in DMs."""
     if _is_group_chat(message):
-        return await message.reply_photo(photo, **kwargs)
-    return await message.answer_photo(photo, **kwargs)
+        return await _api_call_with_retry(message.reply_photo(photo, **kwargs))
+    return await _api_call_with_retry(message.answer_photo(photo, **kwargs))
 
 
 async def _send_long_message(message: Message, text: str) -> None:
