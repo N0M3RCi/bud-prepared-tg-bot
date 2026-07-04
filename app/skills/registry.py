@@ -8,6 +8,7 @@ from app.skills.web_search import TOOL_DEFINITION as SEARCH_TOOL, web_search
 from app.skills.image_gen import TOOL_DEFINITION as IMAGE_TOOL, generate_image
 from app.skills.file_reader import TOOL_DEFINITION as FILE_TOOL, read_file
 from app.skills.calculator import TOOL_DEFINITION as CALC_TOOL, calculate
+from app.skills.weather import TOOL_DEFINITION as WEATHER_TOOL, get_weather
 from app.skills.time_tool import TOOL_DEFINITION as TIME_TOOL, get_current_time
 from app.skills.file_writer import TOOL_DEFINITION as WRITE_TOOL, write_file
 
@@ -20,6 +21,7 @@ _TOOL_HANDLERS: dict[str, Any] = {
     "read_file": read_file,
     "calculate": calculate,
     "get_current_time": get_current_time,
+    "get_weather": get_weather,
     "write_file": write_file,
 }
 
@@ -31,6 +33,7 @@ ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     CALC_TOOL,
     TIME_TOOL,
     WRITE_TOOL,
+    WEATHER_TOOL,
 ]
 
 
