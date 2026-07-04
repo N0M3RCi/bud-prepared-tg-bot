@@ -25,6 +25,7 @@ from app.skills.registry import (
 )
 from app.skills.image_gen import pop_pending_images, current_user_id as image_ctx_var
 from app.skills.file_writer import pop_pending_files, current_user_id as file_writer_ctx
+from app.skills.convert_file import current_user_id as convert_file_ctx, pop_pending_converted
 
 from app.menu import menu_router, process_pending_action, _pending_action as _pending_menu_action, _return_to_page
 from app.dashboard_reporter import (
@@ -539,6 +540,7 @@ CMD_RETRY = Command("retry")
 CMD_CHATID = Command("chatid", "id")
 CMD_CONVERSATIONS = Command("conversations", "conv", "chats")
 CMD_EXPORT = Command("export")
+CMD_EXPORT_PDF = Command("export_pdf")
 CMD_SWITCH = Command("switch")
 CMD_RENAME = Command("rename")
 CMD_DELETE_CONV = Command("delete_conv")
@@ -1013,6 +1015,21 @@ async def cmd_retry(message: Message) -> None:
 
         # Send any pending files generated during retry
         pending_files = pop_pending_files(user_id)
+        pending_converted = pop_pending_converted(user_id)
+        for conv_path, conv_name in pending_converted:
+            try:
+                with open(conv_path, "rb") as cf:
+                    cd_bytes = cf.read()
+                await message.answer_document(
+                    BufferedInputFile(cd_bytes, filename=conv_name),
+                    caption=f"Converted file: {conv_name}",
+                    parse_mode=None,
+                )
+                os.remove(conv_path)
+            except Exception as e:
+                logger.error("Converted file send failed: %s", e)
+        pending_converted = pop_pending_converted(user_id)
+        pending_converted = pop_pending_converted(user_id)
         for file_path, display_name in pending_files:
             try:
                 with open(file_path, "rb") as f:
@@ -1612,6 +1629,38 @@ async def cmd_export(message: Message) -> None:
     except Exception as e:
         logger.error("Export failed: %s", e)
         await _reply_or_answer(message,"Failed to export conversation.")
+
+@router.message(CMD_EXPORT_PDF)
+async def cmd_export_pdf(message: Message) -> None:
+    """Export the current conversation as a PDF document."""
+    user_id = message.from_user.id
+    conv = await Database.get_active_conversation(user_id)
+
+    if not conv:
+        await _reply_or_answer(message, "No active conversation to export.")
+        return
+
+    try:
+        from app.pdf_export import export_conversation_pdf
+        pdf_path = await export_conversation_pdf(user_id, conv["id"])
+        if not pdf_path:
+            await _reply_or_answer(message, "Could not generate PDF export.")
+            return
+
+        with open(pdf_path, "rb") as f:
+            pdf_bytes = f.read()
+
+        await message.answer_document(
+            BufferedInputFile(pdf_bytes, filename=os.path.basename(pdf_path)),
+            caption=f"Conversation exported: {conv.get('title', 'Untitled')}",
+            parse_mode=None,
+        )
+
+        os.remove(pdf_path)
+    except Exception as e:
+        logger.error("PDF export failed: %s", e)
+        await _reply_or_answer(message, "Failed to export conversation as PDF. ReportLab may not be installed.")
+
 
 
 # ─── Admin Commands ───
@@ -2623,6 +2672,7 @@ async def _process_text_response(message: Message, user_text: str) -> str:
         # Tool call iteration — set context vars for both image_gen and file_writer
         image_ctx_var.set(user_id)
         file_writer_ctx.set(user_id)
+        convert_file_ctx.set(user_id)
 
         raw_tool_calls_data = [
             {"id": tc[0], "type": "function", "function": {"name": tc[1], "arguments": json.dumps(tc[2])}}

@@ -11,6 +11,8 @@ from app.skills.calculator import TOOL_DEFINITION as CALC_TOOL, calculate
 from app.skills.weather import TOOL_DEFINITION as WEATHER_TOOL, get_weather
 from app.skills.time_tool import TOOL_DEFINITION as TIME_TOOL, get_current_time
 from app.skills.file_writer import TOOL_DEFINITION as WRITE_TOOL, write_file
+from app.skills.summarize import TOOL_DEFINITION as SUMMARIZE_TOOL, summarize_document
+from app.skills.convert_file import TOOL_DEFINITION as CONVERT_TOOL, convert_file
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,8 @@ _TOOL_HANDLERS: dict[str, Any] = {
     "get_current_time": get_current_time,
     "get_weather": get_weather,
     "write_file": write_file,
+    "summarize_document": summarize_document,
+    "convert_file": convert_file,
 }
 
 # All tool definitions to send to the LLM
@@ -34,6 +38,8 @@ ALL_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     TIME_TOOL,
     WRITE_TOOL,
     WEATHER_TOOL,
+    SUMMARIZE_TOOL,
+    CONVERT_TOOL,
 ]
 
 
