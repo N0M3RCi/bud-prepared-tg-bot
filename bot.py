@@ -151,11 +151,15 @@ async def _webhook_self_test() -> None:
                         )
 
                     if needs_re_register:
-                        await bot.set_webhook(
-                            url=expected_url,
-                            allowed_updates=["message", "callback_query", "my_chat_member"],
-                            drop_pending_updates=False,
-                        )
+                        repair_kwargs: dict = {
+                            "url": expected_url,
+                            "drop_pending_updates": False,
+                        }
+                        if settings.webhook_secret_token:
+                            repair_kwargs["secret_token"] = settings.webhook_secret_token
+                        if _webhook_allowed_updates:
+                            repair_kwargs["allowed_updates"] = _webhook_allowed_updates
+                        await bot.set_webhook(**repair_kwargs)
                         new_info = await bot.get_webhook_info()
                         logger.info("[watchdog] Webhook re-registered: %s", new_info.url)
                         await _notify_admins(bot, f"Webhook re-registered: {new_info.url}")
@@ -516,12 +520,22 @@ async def _health_handler(request):
     )
 
 
+_webhook_allowed_updates: list[str] | None = None
+
+
 async def _run_webhook(bot: Bot, dp: Dispatcher) -> None:
     """Run the bot in webhook mode using aiogram + aiohttp.
 
     Uses aiogram's SimpleRequestHandler for the webhook POST route and
     registers lifecycle hooks directly on the aiohttp Application.
     """
+    if not settings.webhook_secret_token:
+        raise RuntimeError(
+            "WEBHOOK_SECRET_TOKEN is required when USE_WEBHOOK=1. "
+            "Set it to a long random phrase in the server environment."
+        )
+    global _webhook_allowed_updates
+    _webhook_allowed_updates = dp.resolve_used_update_types()
     webhook_full_url = settings.webhook_url.rstrip("/") + settings.webhook_path
 
     # Build aiohttp app with health check + webhook handler

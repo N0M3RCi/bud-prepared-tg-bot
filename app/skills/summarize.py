@@ -5,6 +5,7 @@ import os
 from typing import Any
 
 from app.llm_client import LLMClient
+from app.skills.safe_path import resolve_upload_path
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,10 @@ TOOL_DEFINITION: dict[str, Any] = {
 
 
 async def summarize_document(file_path: str, max_length: int = 150, focus: str = "general") -> str:
+    safe_path = resolve_upload_path(file_path)
+    if not safe_path:
+        return "File path is not allowed. Only uploaded files can be read."
+    file_path = safe_path
     """Summarize a document file using the LLM."""
     if not os.path.isfile(file_path):
         return f"File not found: {file_path}"

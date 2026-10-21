@@ -33,9 +33,13 @@ async def _send_event(payload: dict) -> None:
         return  # Dashboard not configured — silent no-op
     try:
         client = _get_dashboard_client()
+        headers = {}
+        if settings.dashboard_ingest_secret:
+            headers["X-Dashboard-Ingest-Secret"] = settings.dashboard_ingest_secret
         resp = await client.post(
             f"{url.rstrip('/')}/api/events/report",
             json=payload,
+            headers=headers,
         )
         if resp.status_code != 200:
             logger.warning("Dashboard report failed: HTTP %d", resp.status_code)
