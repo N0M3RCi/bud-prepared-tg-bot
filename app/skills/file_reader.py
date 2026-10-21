@@ -10,6 +10,7 @@ from PIL import Image
 
 from app.config import settings
 from app.llm_client import LLMClient
+from app.skills.safe_path import resolve_upload_path
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,10 @@ def _is_extension_blocked(ext: str) -> bool:
 async def read_file(file_path: str, file_type: str = "auto",
                      analysis_prompt: str = "Summarize the contents of this file.") -> str:
     """Read and analyze a file. Runs sync I/O in a thread executor."""
+    safe_path = resolve_upload_path(file_path)
+    if not safe_path:
+        return "File path is not allowed. Only uploaded files can be read."
+    file_path = safe_path
     ext = os.path.splitext(file_path)[1].lower()
 
     # Security: block dangerous file types BEFORE checking existence

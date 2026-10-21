@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import express from 'express';
 import { createServer } from 'http';
 
@@ -9,12 +10,22 @@ app.use(express.json({ limit: '1mb' }));
 // ── SSE clients ────────────────────────────────────────────────────────────────
 let clients = new Set();
 
+function ingestOk(req) {
+  const expected = process.env.DASHBOARD_INGEST_SECRET || '';
+  const given = req.get('x-dashboard-ingest-secret') || req.query.secret || '';
+  if (!expected) return false;
+  const a = Buffer.from(String(given));
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
 app.get('/api/events/stream', (req, res) => {
+  if (!ingestOk(req)) return res.status(401).end();
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
   });
   res.write('data: {"type":"connected"}\n\n');
 
@@ -35,6 +46,7 @@ let reports = [];
 const MAX_REPORTS = 200;
 
 app.post('/api/events/report', (req, res) => {
+  if (!ingestOk(req)) return res.status(401).json({ error: 'Invalid ingest secret' });
   const report = { ...req.body, ts: Date.now() };
   reports.push(report);
   if (reports.length > MAX_REPORTS) reports = reports.slice(-MAX_REPORTS / 2);
@@ -42,7 +54,8 @@ app.post('/api/events/report', (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/events/history', (_req, res) => {
+app.get('/api/events/history', (req, res) => {
+  if (!ingestOk(req)) return res.status(401).json({ error: 'Invalid ingest secret' });
   res.json(reports);
 });
 

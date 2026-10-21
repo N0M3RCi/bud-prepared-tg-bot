@@ -9,6 +9,7 @@ import tempfile
 from typing import Any
 
 from app.llm_client import LLMClient
+from app.skills.safe_path import resolve_upload_path
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,10 @@ current_user_id: contextvars.ContextVar[int] = contextvars.ContextVar("convert_f
 
 
 async def convert_file(file_path: str, target_format: str = "text", output_filename: str | None = None) -> str:
+    safe_path = resolve_upload_path(file_path)
+    if not safe_path:
+        return "File path is not allowed. Only uploaded files can be read."
+    file_path = safe_path
     if not os_mod.path.isfile(file_path):
         return f"File not found: {file_path}"
 

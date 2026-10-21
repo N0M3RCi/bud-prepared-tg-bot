@@ -77,6 +77,7 @@ class Settings:
 
     # Dashboard URL for event reporting
     dashboard_url: str = field(default_factory=lambda: os.getenv("DASHBOARD_URL", ""))
+    dashboard_ingest_secret: str = field(default_factory=lambda: os.getenv("DASHBOARD_INGEST_SECRET", ""))
 
     # Webhook mode (primary — defaults to True; set USE_WEBHOOK=0 for polling)
     use_webhook: bool = os.getenv("USE_WEBHOOK", "1").lower() not in ("0", "false", "no")
